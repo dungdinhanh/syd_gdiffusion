@@ -7,10 +7,12 @@ MODEL_FLAGS="--attention_resolutions 32,16,8 --class_cond True --diffusion_steps
 --image_size 64 --learn_sigma True \
 --noise_schedule cosine --num_channels 192 \
 --num_head_channels 64 --num_res_blocks 3\
- --resblock_updown True --use_new_attention_order True --use_fp16 True --use_scale_shift_norm True"
+ --resblock_updown True --use_new_attention_order True \
+ --use_fp16 True --use_scale_shift_norm True"
 
 
-cmd="python classifier_sample.py --logdir runs/classifier/ ${MODEL_FLAGS} --classifier_scale 1.0 --classifier_path models/64x64_classifier.pt \
- --classifier_depth 4 --model_path models/64x64_diffusion.pt ${SAMPLE_FLAGS}"
+cmd="python classifier_sample.py --logdir ../drive/MyDrive/usydphd/gdiff/runs/classifier/ ${MODEL_FLAGS} \
+--classifier_scale 1.0 --classifier_path ../drive/MyDrive/usydphd/gdiff/models/64x64_classifier.pt \
+ --classifier_depth 4 --model_path ../drive/MyDrive/usydphd/gdiff/models/64x64_diffusion.pt ${SAMPLE_FLAGS}"
 echo ${cmd}
 eval ${cmd}
