@@ -105,6 +105,7 @@ def main():
         all_images.extend(batch_images)
         gathered_labels = [th.zeros_like(classes) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered_labels, classes)
+        batch_labels = [labels.cpu().numpy() for labels in gathered_labels]
         all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
         logger.log(f"created {len(all_images) * args.batch_size} samples")
 
@@ -114,7 +115,7 @@ def main():
             # exit(0)
             for j in range(len(batch_images[i])):
                 im = Image.fromarray(batch_images[i][j], "RGB")
-                im.save(os.path.join(output_images_folder, "%d_image%d.png"%(labels[i][j], count_image)))
+                im.save(os.path.join(output_images_folder, "%d_image%d.png"%(batch_labels[i][j], count_image)))
                 count_image += 1
 
     arr = np.concatenate(all_images, axis=0)
