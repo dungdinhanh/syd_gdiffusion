@@ -26,13 +26,14 @@ from guided_diffusion_hfai.script_util import (
     classifier_and_diffusion_defaults,
     create_classifier_and_diffusion,
 )
+from guided_diffusion_hfai.losses import kdloss
 from guided_diffusion_hfai.train_util import parse_resume_step_from_filename, log_loss_dict
 
 
 def main(local_rank):
     args = create_argparser().parse_args()
     save_model_folder = os.path.join(args.logdir, "models")
-    os.makedirs(save_model_folder,exist_ok=True)
+    os.makedirs(save_model_folder, exist_ok=True)
     dist_util.setup_dist(local_rank)
 
 
@@ -40,7 +41,10 @@ def main(local_rank):
         args.logdir,
         datetime.datetime.now().strftime("openai-%Y-%m-%d-%H-%M-%S-%f"),
     )
-    logger.configure(log_folder)
+    if dist.get_rank() == 0:
+        logger.configure(log_folder, rank=dist.get_rank())
+    else:
+        logger.configure(rank=dist.get_rank())
     logger.log("creating model and diffusion...")
 
     model, diffusion = create_classifier_and_diffusion(
@@ -55,7 +59,7 @@ def main(local_rank):
     resume_step = 0
 
     if args.resume_checkpoint:
-        resume_step = parse_resume_step_from_filename(args.resume_checkpoint)
+        resume_step = parse_resume_step_from_filename(args.resume_checkpoint) + 1
 
         logger.log(
             f"loading model from checkpoint: {args.resume_checkpoint}... at {resume_step} step"
@@ -82,10 +86,6 @@ def main(local_rank):
                 "latest Checkpoint found, loading.. "
             )
             model.load_state_dict(dist_util.load_state_dict(latest_model))
-
-
-
-
 
     # Needed for creating correct EMAs and fp16 parameters.
     dist_util.sync_params(model.parameters())
@@ -121,7 +121,7 @@ def main(local_rank):
         #     class_cond=True,
         # )
         val_data = load_data_imagenet_hfai(train=False, image_size=args.image_size,
-                                           batch_size=args.batch_size, random_crop=True)
+                                           batch_size=args.batch_size)
     else:
         val_data = None
 
@@ -142,13 +142,13 @@ def main(local_rank):
                 logger.log(f"Loading optimizer state from checkpoint: {opt_checkpoint}")
                 opt_dict = dist_util.load_state_dict(opt_checkpoint)
                 opt.load_state_dict(opt_dict["opt"])
-                step = opt_dict['step']
+                step = opt_dict['step'] + 1
                 logger.log(f"Training from {step}")
                 resume_step = step
 
 
 
-    logger.log("training classifier model...")
+    logger.log("training variational prediction classifier model...")
 
     def forward_backward_log(data_loader, prefix="train"):
         batch, extra = next(data_loader)
@@ -156,26 +156,32 @@ def main(local_rank):
 
         batch = batch.to(dist_util.dev())
         # Noisy images
-        if args.noised:
-            t, _ = schedule_sampler.sample(batch.shape[0], dist_util.dev())
-            batch = diffusion.q_sample(batch, t)
-        else:
-            t = th.zeros(batch.shape[0], dtype=th.long, device=dist_util.dev())
 
-        for i, (sub_batch, sub_labels, sub_t) in enumerate(
-            split_microbatches(args.microbatch, batch, labels, t)
+        t, _ = schedule_sampler.sample(batch.shape[0], dist_util.dev())
+        batch_noise = diffusion.q_sample(batch, t)
+
+        t_clean = th.zeros(batch.shape[0], dtype=th.long, device=dist_util.dev())
+
+        for i, (sub_batch, sub_batch_noises, sub_gt_labels, sub_t) in enumerate(
+            split_microbatches(args.microbatch, batch, batch_noise, labels ,t)
         ):
-            logits = model(sub_batch, timesteps=sub_t)
-            loss = F.cross_entropy(logits, sub_labels, reduction="none")
+            model.eval()
+            pseudo_labels = model(sub_batch, timesteps=t_clean).detach()
+            model.train()
+            logits = model(sub_batch_noises, timesteps=sub_t)
+
+            loss = kdloss(logits, pseudo_labels)
 
             losses = {}
             losses[f"{prefix}_loss"] = loss.detach()
-            losses[f"{prefix}_acc@1"] = compute_top_k(
-                logits, sub_labels, k=1, reduction="none"
+            losses[f"{prefix}_kd_acc@1"] = compute_top_k_kd(
+                logits, pseudo_labels, k=1, reduction="none"
             )
-            losses[f"{prefix}_acc@5"] = compute_top_k(
-                logits, sub_labels, k=5, reduction="none"
-            )
+            losses[f"{prefix}_acc@1"] = compute_top_k(logits, sub_gt_labels, k=1,
+                                                      reduction="none")
+            # losses[f"{prefix}_acc@5"] = compute_top_k(
+            #     logits, sub_labels, k=5, reduction="none"
+            # )
             log_loss_dict(diffusion, sub_t, losses)
             del losses
             loss = loss.mean()
@@ -212,7 +218,8 @@ def main(local_rank):
         ):
             logger.log("saving model...")
             save_model(mp_trainer, opt, step + resume_step, save_model_folder)
-        if step % 1000 == 0 and dist.get_rank() == 0:
+        if step % 1000 == 0 and dist.get_rank() == 0 and step != 0:
+            logger.log("Saving latest model")
             save_model_latest(mp_trainer, opt, step+resume_step, save_model_folder)
 
     if dist.get_rank() == 0:
@@ -251,6 +258,14 @@ def compute_top_k(logits, labels, k, reduction="mean"):
         return (top_ks == labels[:, None]).float().sum(dim=-1).mean().item()
     elif reduction == "none":
         return (top_ks == labels[:, None]).float().sum(dim=-1)
+
+def compute_top_k_kd(logits, labels_teacher, k, reduction="mean"):
+    _, top_ks = th.topk(logits, k, dim=-1)
+    _, labels = th.topk(labels_teacher, 1, dim=-1)
+    if reduction == "mean":
+        return (top_ks == labels).float().sum(dim=-1).mean().item()
+    elif reduction == "none":
+        return (top_ks == labels).float().sum(dim=-1)
 
 
 def split_microbatches(microbatch, *args):

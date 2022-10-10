@@ -8,11 +8,12 @@ import os
 
 import numpy as np
 import torch as th
-import torch.distributed as dist
+# import torch.distributed as dist
+import hfai.nccl.distributed as dist
 import torch.nn.functional as F
-
-from guided_diffusion import dist_util, logger
-from guided_diffusion.script_util import (
+import hfai
+from guided_diffusion_hfai import dist_util, logger
+from guided_diffusion_hfai.script_util import (
     NUM_CLASSES,
     model_and_diffusion_defaults,
     classifier_defaults,
@@ -24,19 +25,20 @@ from guided_diffusion.script_util import (
 import datetime
 from PIL import Image
 
-def main():
+
+def main(local_rank):
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist()
+    dist_util.setup_dist(local_rank)
 
     save_folder = os.path.join(
         args.logdir,
         datetime.datetime.now().strftime("openai-%Y-%m-%d-%H-%M-%S-%f"),
     )
-    logger.configure(save_folder)
 
-    save_folder = logger.get_dir()
-    output_images_folder = os.path.join(save_folder, "reference")
+    logger.configure(save_folder, rank=dist.get_rank())
+
+    output_images_folder = os.path.join(args.logdir, "reference")
     os.makedirs(output_images_folder, exist_ok=True)
 
     logger.log("creating model and diffusion...")
@@ -50,6 +52,7 @@ def main():
     if args.use_fp16:
         model.convert_to_fp16()
     model.eval()
+
 
     logger.log("loading classifier...")
     classifier = create_classifier(**args_to_dict(args, classifier_defaults().keys()))
@@ -74,10 +77,16 @@ def main():
         assert y is not None
         return model(x, t, y if args.class_cond else None)
 
+    logger.log("Looking for previous file")
+    checkpoint = os.path.join(output_images_folder, "samples_last.npz")
+    if os.path.isfile(checkpoint):
+        npzfile = np.load(checkpoint)
+        all_images = list(npzfile['arr_0'])
+        all_labels = list(npzfile['arr_1'])
+    else:
+        all_images = []
+        all_labels = []
     logger.log("sampling...")
-    all_images = []
-    all_labels = []
-    count_image = 0
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = {}
         classes = th.randint(
@@ -106,17 +115,19 @@ def main():
         gathered_labels = [th.zeros_like(classes) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered_labels, classes)
         batch_labels = [labels.cpu().numpy() for labels in gathered_labels]
-        all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
-        logger.log(f"created {len(all_images) * args.batch_size} samples")
+        all_labels.extend(batch_labels)
+        if dist.get_rank() == 0:
+            logger.log(f"created {len(all_images) * args.batch_size} samples")
+            np.savez(checkpoint, np.stack(all_images), np.stack(all_labels))
 
-        for i in range(len(batch_images)):
-            # print(batch_images[0].shape)
-            # print(len(batch_images))
-            # exit(0)
-            for j in range(len(batch_images[i])):
-                im = Image.fromarray(batch_images[i][j], "RGB")
-                im.save(os.path.join(output_images_folder, "%d_image%d.png"%(batch_labels[i][j], count_image)))
-                count_image += 1
+        #     for i in range(len(batch_images)):
+        #         # print(batch_images[0].shape)
+        #         # print(len(batch_images))
+        #         # exit(0)
+        #         for j in range(len(batch_images[i])):
+        #             im = Image.fromarray(batch_images[i][j], "RGB")
+        #             im.save(os.path.join(output_images_folder, "%d_image%d.png"%(batch_labels[i][j], count_image)))
+        #             count_image += 1
 
     arr = np.concatenate(all_images, axis=0)
     arr = arr[: args.num_samples]
@@ -124,9 +135,10 @@ def main():
     label_arr = label_arr[: args.num_samples]
     if dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
+        out_path = os.path.join(output_images_folder, f"samples_{shape_str}.npz")
         logger.log(f"saving to {out_path}")
         np.savez(out_path, arr, label_arr)
+        os.remove(checkpoint)
 
     dist.barrier()
     logger.log("sampling complete")
@@ -150,5 +162,7 @@ def create_argparser():
     return parser
 
 
+
 if __name__ == "__main__":
-    main()
+    ngpus = th.cuda.device_count()
+    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)

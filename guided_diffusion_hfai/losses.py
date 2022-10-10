@@ -5,8 +5,24 @@ https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0
 """
 
 import numpy as np
+import torch
 
 import torch as th
+
+import torch.nn.functional as F
+
+
+def kdloss(y, teacher_scores, temperature=3):
+    """
+    Loss used for previous KD experiments
+    """
+    p = F.log_softmax(y / temperature, dim=1)
+    q = F.softmax(teacher_scores / temperature, dim=1)
+    # l_kl = F.kl_div(p, q, size_average=False) / y.shape[0]
+    # l_kl = F.kl_div(p, q, reduction='batchmean')
+    l_kl = F.kl_div(p, q, reduction="none")
+    l_kl = torch.sum(l_kl, dim=1)
+    return l_kl
 
 
 def normal_kl(mean1, logvar1, mean2, logvar2):

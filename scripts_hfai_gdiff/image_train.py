@@ -3,24 +3,35 @@ Train a diffusion model on images.
 """
 
 import argparse
+import os
 
-from guided_diffusion import dist_util, logger
-from guided_diffusion.image_datasets import load_data
-from guided_diffusion.resample import create_named_schedule_sampler
-from guided_diffusion.script_util import (
+from guided_diffusion_hfai import dist_util, logger
+from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai
+from guided_diffusion_hfai.resample import create_named_schedule_sampler
+from guided_diffusion_hfai.script_util import (
     model_and_diffusion_defaults,
     create_model_and_diffusion,
     args_to_dict,
     add_dict_to_argparser,
 )
-from guided_diffusion.train_util import TrainLoop
+from guided_diffusion_hfai.train_util import TrainLoop
+import hfai
+import torch as th
+import hfai.nccl.distributed as dist
 
 
-def main():
+def main(local_rank):
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist()
-    logger.configure()
+    dist_util.setup_dist(local_rank)
+    log_folder = os.path.join(
+        args.logdir,
+        "logs"
+    )
+    if dist.get_rank() == 0:
+        logger.configure(log_folder, rank=dist.get_rank())
+    else:
+        logger.configure(rank=dist.get_rank())
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -30,11 +41,9 @@ def main():
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log("creating data loader...")
-    data = load_data(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        image_size=args.image_size,
-        class_cond=args.class_cond,
+    data = load_data_imagenet_hfai(
+        train=True, image_size=args.image_size,
+        batch_size=args.batch_size, random_crop=True
     )
 
     logger.log("training...")
@@ -54,6 +63,7 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
+        logdir=args.logdir
     ).run_loop()
 
 
@@ -80,4 +90,5 @@ def create_argparser():
 
 
 if __name__ == "__main__":
-    main()
+    ngpus = th.cuda.device_count()
+    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)

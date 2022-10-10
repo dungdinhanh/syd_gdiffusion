@@ -3,3 +3,6 @@ torch
 tqdm
 numpy
 mpi4py
+scipy
+requests
+tqdm

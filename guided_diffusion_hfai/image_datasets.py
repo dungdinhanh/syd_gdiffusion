@@ -1,20 +1,81 @@
 import math
 import random
-
+from typing import Callable, Optional
 from PIL import Image
+import pickle
 import blobfile as bf
-from mpi4py import MPI
+# from mpi4py import MPI
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
+from hfai.datasets.imagenet import ImageNet
+from torchvision import transforms, models, datasets
+from torch.utils.data.distributed import DistributedSampler
 
 
-def load_data(
+# def load_data(
+#     *,
+#     data_dir,
+#     batch_size,
+#     image_size,
+#     class_cond=False,
+#     deterministic=False,
+#     random_crop=False,
+#     random_flip=True,
+# ):
+#     """
+#     For a dataset, create a generator over (images, kwargs) pairs.
+#
+#     Each images is an NCHW float tensor, and the kwargs dict contains zero or
+#     more keys, each of which map to a batched Tensor of their own.
+#     The kwargs dict can be used for class labels, in which case the key is "y"
+#     and the values are integer tensors of class labels.
+#
+#     :param data_dir: a dataset directory.
+#     :param batch_size: the batch size of each returned pair.
+#     :param image_size: the size to which images are resized.
+#     :param class_cond: if True, include a "y" key in returned dicts for class
+#                        label. If classes are not available and this is true, an
+#                        exception will be raised.
+#     :param deterministic: if True, yield results in a deterministic order.
+#     :param random_crop: if True, randomly crop the images for augmentation.
+#     :param random_flip: if True, randomly flip the images for augmentation.
+#     """
+#     if not data_dir:
+#         raise ValueError("unspecified data directory")
+#     all_files = _list_image_files_recursively(data_dir)
+#     classes = None
+#     if class_cond:
+#         # Assume classes are the first part of the filename,
+#         # before an underscore.
+#         class_names = [bf.basename(path).split("_")[0] for path in all_files]
+#         sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
+#         classes = [sorted_classes[x] for x in class_names]
+#     dataset = ImageDataset(
+#         image_size,
+#         all_files,
+#         classes=classes,
+#         shard=MPI.COMM_WORLD.Get_rank(),
+#         num_shards=MPI.COMM_WORLD.Get_size(),
+#         random_crop=random_crop,
+#         random_flip=random_flip,
+#     )
+#     if deterministic:
+#         loader = DataLoader(
+#             dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True
+#         )
+#     else:
+#         loader = DataLoader(
+#             dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True
+#         )
+#     while True:
+#         yield from loader
+
+
+def load_data_imagenet_hfai(
     *,
-    data_dir,
+    train=True,
     batch_size,
     image_size,
-    class_cond=False,
-    deterministic=False,
     random_crop=False,
     random_flip=True,
 ):
@@ -36,36 +97,42 @@ def load_data(
     :param random_crop: if True, randomly crop the images for augmentation.
     :param random_flip: if True, randomly flip the images for augmentation.
     """
-    if not data_dir:
-        raise ValueError("unspecified data directory")
-    all_files = _list_image_files_recursively(data_dir)
-    classes = None
-    if class_cond:
-        # Assume classes are the first part of the filename,
-        # before an underscore.
-        class_names = [bf.basename(path).split("_")[0] for path in all_files]
-        sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
-        classes = [sorted_classes[x] for x in class_names]
-    dataset = ImageDataset(
-        image_size,
-        all_files,
-        classes=classes,
-        shard=MPI.COMM_WORLD.Get_rank(),
-        num_shards=MPI.COMM_WORLD.Get_size(),
-        random_crop=random_crop,
-        random_flip=random_flip,
-    )
-    if deterministic:
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True
-        )
+    # if not data_dir:
+    #     raise ValueError("unspecified data directory")
+    # all_files = _list_image_files_recursively(data_dir)
+    # classes = None
+    # if class_cond:
+    #     # Assume classes are the first part of the filename,
+    #     # before an underscore.
+    #     class_names = [bf.basename(path).split("_")[0] for path in all_files]
+    #     sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
+    #     classes = [sorted_classes[x] for x in class_names]
+    # dataset = ImageDataset(
+    #     image_size,
+    #     all_files,
+    #     classes=classes,
+    #     shard=MPI.COMM_WORLD.Get_rank(),
+    #     num_shards=MPI.COMM_WORLD.Get_size(),
+    #     random_crop=random_crop,
+    #     random_flip=random_flip,
+    # )
+    if train:
+        dataset = ImageNetHF(image_size, random_crop=random_crop, random_flip=random_flip, split='train')
     else:
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True
-        )
+        dataset = ImageNetHF(image_size, random_crop=random_crop, random_flip=random_flip, split='val')
+    # if deterministic:
+    #     loader = DataLoader(
+    #         dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True
+    #     )
+    # else:
+    #     loader = DataLoader(
+    #         dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True
+    #     )
+    data_sampler = DistributedSampler(dataset, shuffle=True)
+    loader = dataset.loader(batch_size, num_workers=8, sampler=data_sampler, pin_memory=True)
     while True:
-        yield from loader
-
+        yield from loader # put all items of loader into list and concat all list infinitely
+    # return loader
 
 def _list_image_files_recursively(data_dir):
     results = []
@@ -121,6 +188,44 @@ class ImageDataset(Dataset):
         if self.local_classes is not None:
             out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
         return np.transpose(arr, [2, 0, 1]), out_dict
+
+
+class ImageNetHF(ImageNet):
+    def __init__(self, resolution, random_crop=False, random_flip=True, split='train'):
+        to_tensor_transform = transforms.Compose([transforms.ToTensor()])
+        super(ImageNetHF, self).__init__(split=split, transform=to_tensor_transform, check_data=True, miniset=False)
+        self.resolution = resolution
+        self.random_crop = random_crop
+        self.random_flip = random_flip
+
+    def __getitem__(self, indices):
+        imgs_bytes = self.reader.read(indices)
+        samples = []
+        for i, bytes_ in enumerate(imgs_bytes):
+            img = pickle.loads(bytes_).convert("RGB")
+            label = self.meta["targets"][indices[i]]
+            samples.append((img, int(label)))
+
+        transformed_samples = []
+        for img, label in samples:
+            if self.random_crop:
+                arr = random_crop_arr(img, self.resolution)
+            else:
+                arr = center_crop_arr(img, self.resolution)
+
+            if self.random_flip and random.random() < 0.5:
+                arr = arr[:, ::-1]
+
+            img = arr.astype(np.float32) / 127.5 - 1
+            # img = np.transpose(img, [2, 0, 1]) # might not need to transpose
+            if self.transform:
+                img = self.transform(img)
+            out_dict = {}
+            # if self.local_classes is not None:
+            out_dict["y"] = label
+
+            transformed_samples.append((img, out_dict))
+        return transformed_samples
 
 
 def center_crop_arr(pil_image, image_size):

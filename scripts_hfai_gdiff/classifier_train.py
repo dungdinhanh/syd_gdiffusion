@@ -1,37 +1,51 @@
 """
 Train a noised image classifier on ImageNet.
 """
-
+# import hfai_env
+# hfai_env.set_env('dbg')
 import argparse
 import os
+import datetime
 
 import blobfile as bf
 import torch as th
-import torch.distributed as dist
+# import torch.distributed as dist
+import hfai.nccl.distributed as dist
 import torch.nn.functional as F
-from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+# from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+from hfai.nn.parallel import DistributedDataParallel as DDP
+import hfai
 from torch.optim import AdamW
 
-from guided_diffusion import dist_util, logger
-from guided_diffusion.fp16_util import MixedPrecisionTrainer
-from guided_diffusion.image_datasets import load_data
-from guided_diffusion.resample import create_named_schedule_sampler
-from guided_diffusion.script_util import (
+from guided_diffusion_hfai import dist_util, logger
+from guided_diffusion_hfai.fp16_util import MixedPrecisionTrainer
+from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai
+from guided_diffusion_hfai.resample import create_named_schedule_sampler
+from guided_diffusion_hfai.script_util import (
     add_dict_to_argparser,
     args_to_dict,
     classifier_and_diffusion_defaults,
     create_classifier_and_diffusion,
 )
-from guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
+from guided_diffusion_hfai.train_util import parse_resume_step_from_filename, log_loss_dict
 
 
-def main():
+def main(local_rank):
     args = create_argparser().parse_args()
+    save_model_folder = os.path.join(args.logdir, "models")
+    os.makedirs(save_model_folder, exist_ok=True)
+    dist_util.setup_dist(local_rank)
 
-    dist_util.setup_dist()
-    logger.configure()
-
+    log_folder = os.path.join(
+        args.logdir,
+        "logs",
+    )
+    if dist.get_rank() == 0:
+        logger.configure(log_folder, rank=dist.get_rank())
+    else:
+        logger.configure(rank=dist.get_rank())
     logger.log("creating model and diffusion...")
+
     model, diffusion = create_classifier_and_diffusion(
         **args_to_dict(args, classifier_and_diffusion_defaults().keys())
     )
@@ -42,17 +56,39 @@ def main():
         )
 
     resume_step = 0
+
     if args.resume_checkpoint:
         resume_step = parse_resume_step_from_filename(args.resume_checkpoint)
-        if dist.get_rank() == 0:
+
+        logger.log(
+            f"loading model from checkpoint: {args.resume_checkpoint}... at {resume_step} step"
+        )
+        model.load_state_dict(
+            dist_util.load_state_dict(
+                args.resume_checkpoint
+            )
+        )
+        load_last_checkpoint=False
+    else:
+        logger.log(
+            f"checking latest.pt model exist at: {save_model_folder}"
+        )
+        latest_model = os.path.join(save_model_folder, "latest.pt")
+        if not os.path.isfile(latest_model):
             logger.log(
-                f"loading model from checkpoint: {args.resume_checkpoint}... at {resume_step} step"
+                "No latest checkpoint found - train from scratch"
             )
-            model.load_state_dict(
-                dist_util.load_state_dict(
-                    args.resume_checkpoint, map_location=dist_util.dev()
-                )
+            load_last_checkpoint = False
+        else:
+            load_last_checkpoint = True
+            logger.log(
+                "latest Checkpoint found, loading.. "
             )
+            model.load_state_dict(dist_util.load_state_dict(latest_model))
+
+
+
+
 
     # Needed for creating correct EMAs and fp16 parameters.
     dist_util.sync_params(model.parameters())
@@ -64,27 +100,31 @@ def main():
     model = DDP(
         model,
         device_ids=[dist_util.dev()],
-        output_device=dist_util.dev(),
+        # output_device=dist_util.dev(),
         broadcast_buffers=False,
-        bucket_cap_mb=128,
+        # bucket_cap_mb=128,
         find_unused_parameters=False,
     )
 
     logger.log("creating data loader...")
-    data = load_data(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        image_size=args.image_size,
-        class_cond=True,
-        random_crop=True,
-    )
+    # data = load_data(
+    #     data_dir=args.data_dir,
+    #     batch_size=args.batch_size,
+    #     image_size=args.image_size,
+    #     class_cond=True,
+    #     random_crop=True,
+    # )
+    data = load_data_imagenet_hfai(train=True, image_size=args.image_size,
+                                   batch_size=args.batch_size, random_crop=True)
     if args.val_data_dir:
-        val_data = load_data(
-            data_dir=args.val_data_dir,
-            batch_size=args.batch_size,
-            image_size=args.image_size,
-            class_cond=True,
-        )
+        # val_data = load_data(
+        #     data_dir=args.val_data_dir,
+        #     batch_size=args.batch_size,
+        #     image_size=args.image_size,
+        #     class_cond=True,
+        # )
+        val_data = load_data_imagenet_hfai(train=False, image_size=args.image_size,
+                                           batch_size=args.batch_size, random_crop=True)
     else:
         val_data = None
 
@@ -96,8 +136,20 @@ def main():
         )
         logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
         opt.load_state_dict(
-            dist_util.load_state_dict(opt_checkpoint, map_location=dist_util.dev())
+            dist_util.load_state_dict(opt_checkpoint)
         )
+    else:
+        if load_last_checkpoint:
+            opt_checkpoint = os.path.join(save_model_folder, "optlatest.pt")
+            if os.path.isfile(opt_checkpoint):
+                logger.log(f"Loading optimizer state from checkpoint: {opt_checkpoint}")
+                opt_dict = dist_util.load_state_dict(opt_checkpoint)
+                opt.load_state_dict(opt_dict["opt"])
+                step = opt_dict['step']
+                logger.log(f"Training from {step}")
+                resume_step = step
+
+
 
     logger.log("training classifier model...")
 
@@ -134,6 +186,9 @@ def main():
                 if i == 0:
                     mp_trainer.zero_grad()
                 mp_trainer.backward(loss * len(sub_batch) / len(batch))
+    data_iter = iter(data)
+    if val_data is not None:
+        val_iter = iter(val_data)
 
     for step in range(args.iterations - resume_step):
         logger.logkv("step", step + resume_step)
@@ -143,13 +198,13 @@ def main():
         )
         if args.anneal_lr:
             set_annealed_lr(opt, args.lr, (step + resume_step) / args.iterations)
-        forward_backward_log(data)
+        forward_backward_log(data_iter)
         mp_trainer.optimize(opt)
         if val_data is not None and not step % args.eval_interval:
             with th.no_grad():
                 with model.no_sync():
                     model.eval()
-                    forward_backward_log(val_data, prefix="val")
+                    forward_backward_log(val_iter, prefix="val")
                     model.train()
         if not step % args.log_interval:
             logger.dumpkvs()
@@ -159,11 +214,13 @@ def main():
             and not (step + resume_step) % args.save_interval
         ):
             logger.log("saving model...")
-            save_model(mp_trainer, opt, step + resume_step)
+            save_model(mp_trainer, opt, step + resume_step, save_model_folder)
+        if step % 1000 == 0 and dist.get_rank() == 0:
+            save_model_latest(mp_trainer, opt, step+resume_step, save_model_folder)
 
     if dist.get_rank() == 0:
         logger.log("saving model...")
-        save_model(mp_trainer, opt, step + resume_step)
+        save_model(mp_trainer, opt, step + resume_step, save_model_folder)
     dist.barrier()
 
 
@@ -173,13 +230,22 @@ def set_annealed_lr(opt, base_lr, frac_done):
         param_group["lr"] = lr
 
 
-def save_model(mp_trainer, opt, step):
+def save_model(mp_trainer, opt, step, model_folder="runs", latest=False):
     if dist.get_rank() == 0:
         th.save(
             mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
-            os.path.join(logger.get_dir(), f"model{step:06d}.pt"),
+            os.path.join(model_folder, f"model{step:06d}.pt"),
         )
-        th.save(opt.state_dict(), os.path.join(logger.get_dir(), f"opt{step:06d}.pt"))
+        th.save(opt.state_dict(), os.path.join(model_folder, f"opt{step:06d}.pt"))
+
+def save_model_latest(mp_trainer, opt, step, model_folder="runs"):
+    if dist.get_rank() == 0:
+        th.save(
+            mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
+            os.path.join(model_folder, "latest.pt"),
+        )
+        th.save({'opt': opt.state_dict(),
+                 'step': step}, os.path.join(model_folder, "optlatest.pt"))
 
 
 def compute_top_k(logits, labels, k, reduction="mean"):
@@ -215,6 +281,7 @@ def create_argparser():
         log_interval=10,
         eval_interval=5,
         save_interval=10000,
+        logdir="runs"
     )
     defaults.update(classifier_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
@@ -223,4 +290,5 @@ def create_argparser():
 
 
 if __name__ == "__main__":
-    main()
+    ngpus = th.cuda.device_count()
+    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)

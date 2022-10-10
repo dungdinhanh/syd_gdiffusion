@@ -4,3 +4,6 @@ classify_image_graph_def.pb
 runs/
 models/
 dist/
+guided_diffusion.egg-info/
+.idea/
+.hfai/

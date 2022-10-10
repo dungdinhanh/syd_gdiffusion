@@ -17,7 +17,7 @@ cmd="ls"
 echo ${cmd}
 eval ${cmd}
 
-cmd="python scripts_hfai_gdiff/classifier_sample.py --logdir runs/classifier_st_pretrained/ ${MODEL_FLAGS} \
+cmd="python scripts_hfai_gdiff/imagenet_sample.py --logdir runs/real/ ${MODEL_FLAGS} \
 --classifier_scale 1.0 --classifier_path runs/classifier_training_4nodes/models/model299999.pt \
  --classifier_depth 4 --model_path models/64x64_diffusion.pt ${SAMPLE_FLAGS}"
 echo ${cmd}
