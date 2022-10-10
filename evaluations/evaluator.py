@@ -30,11 +30,15 @@ def main():
     parser.add_argument("sample_batch", help="path to sample batch npz file")
     args = parser.parse_args()
 
+    # print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
+    # exit(0)
+
     config = tf.ConfigProto(
         allow_soft_placement=True  # allows DecodeJpeg to run on CPU in Inception graph
     )
     config.gpu_options.allow_growth = True
     evaluator = Evaluator(tf.Session(config=config))
+
 
     print("warming up TensorFlow...")
     # This will cause TF to print a bunch of verbose stuff now rather
