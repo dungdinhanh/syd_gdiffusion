@@ -19,13 +19,22 @@ from guided_diffusion_hfai.script_util import (
     add_dict_to_argparser,
     args_to_dict,
 )
+import hfai
 
 
-def main():
+def main(local_rank):
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist()
-    logger.configure()
+    dist_util.setup_dist(local_rank)
+
+    save_folder = os.path.join(
+        args.logdir,
+        "logs",
+    )
+    ref_folder = os.path.join(args.logdir, "reference")
+    os.makedirs(ref_folder, exist_ok=True)
+
+    logger.configure(save_folder, rank=dist.get_rank())
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -42,6 +51,10 @@ def main():
     logger.log("sampling...")
     all_images = []
     all_labels = []
+    if args.image_size == 28:
+        img_channels = 1
+    else:
+        img_channels = 3
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = {}
         if args.class_cond:
@@ -54,7 +67,7 @@ def main():
         )
         sample = sample_fn(
             model,
-            (args.batch_size, 3, args.image_size, args.image_size),
+            (args.batch_size, img_channels, args.image_size, args.image_size),
             clip_denoised=args.clip_denoised,
             model_kwargs=model_kwargs,
         )
@@ -80,7 +93,7 @@ def main():
         label_arr = label_arr[: args.num_samples]
     if dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
+        out_path = os.path.join(ref_folder, f"samples_{shape_str}.npz")
         logger.log(f"saving to {out_path}")
         if args.class_cond:
             np.savez(out_path, arr, label_arr)
@@ -98,6 +111,7 @@ def create_argparser():
         batch_size=16,
         use_ddim=False,
         model_path="",
+        logdir="runs"
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
@@ -106,4 +120,5 @@ def create_argparser():
 
 
 if __name__ == "__main__":
-    main()
+    ngpus = th.cuda.device_count()
+    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)

@@ -61,7 +61,7 @@ class TrainLoop:
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
-        self.logdir = os.path.join(logdir, "model")
+        self.logdir = os.path.join(logdir, "models")
         os.makedirs(self.logdir, exist_ok=True)
         self.step = 0
         self.resume_step = 0
@@ -87,10 +87,18 @@ class TrainLoop:
                 self._load_ema_parameters(rate) for rate in self.ema_rate
             ]
         else:
-            self.ema_params = [
-                copy.deepcopy(self.mp_trainer.master_params)
-                for _ in range(len(self.ema_rate))
-            ]
+            if self.load_last_checkpoint:
+                self._load_optimizer_state()
+                # Model was resumed, either due to a restart or a checkpoint
+                # being specified at the command line.
+                self.ema_params = [
+                    self._load_ema_parameters(rate) for rate in self.ema_rate
+                ]
+            else:
+                self.ema_params = [
+                    copy.deepcopy(self.mp_trainer.master_params)
+                    for _ in range(len(self.ema_rate))
+                ]
 
         if th.cuda.is_available():
             self.use_ddp = True
@@ -132,7 +140,7 @@ class TrainLoop:
                     logger.log(f"Loading model from latest checkpoint: {last_checkpoint}")
                     self.model.load_state_dict(
                         dist_util.load_state_dict(
-                            resume_checkpoint
+                            last_checkpoint
                         )
                     )
             else:
@@ -154,7 +162,7 @@ class TrainLoop:
                 ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
         else:
             if self.load_last_checkpoint:
-                ema_latest = find_last_ema_checkpoint(main_checkpoint, rate)
+                ema_latest = find_last_ema_checkpoint(self.logdir, rate)
                 if ema_latest is None:
                     logger.log(f"No latest ema checkpoint found - Exiting")
                     exit(0)
@@ -164,8 +172,8 @@ class TrainLoop:
                         ema_latest
                     )
                     ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
-
-
+        for i in range(len(ema_params)):
+            ema_params[i] = ema_params[i].to(dist_util.dev())
         dist_util.sync_params(ema_params)
         return ema_params
 
@@ -316,7 +324,7 @@ class TrainLoop:
 
             if dist.get_rank() == 0:
                 with bf.BlobFile(
-                        bf.join(get_blob_logdir(), f"optlatest.pt"),
+                        bf.join(self.logdir, f"optlatest.pt"),
                         "wb",
                 ) as f:
                     th.save({'opt': self.opt.state_dict(),
@@ -364,11 +372,11 @@ def find_ema_checkpoint(main_checkpoint, step, rate):
         return path
     return None
 
-def find_last_ema_checkpoint(main_checkpoint, rate):
-    if main_checkpoint is None:
+def find_last_ema_checkpoint(logdir, rate):
+    if logdir is None:
         return None
     filename = f"ema_{rate}_latest.pt"
-    path = bf.join(bf.dirname(main_checkpoint), filename)
+    path = bf.join(logdir, filename)
     if bf.exists(path):
         return path
     return None
@@ -381,3 +389,26 @@ def log_loss_dict(diffusion, ts, losses):
         for sub_t, sub_loss in zip(ts.cpu().numpy(), values.detach().cpu().numpy()):
             quartile = int(4 * sub_t / diffusion.num_timesteps)
             logger.logkv_mean(f"{key}_q{quartile}", sub_loss)
+
+def model_entropy(x_pred):
+    # compute entropy loss
+    x_pred = th.mean(x_pred, dim=0)
+    loss = x_pred * th.log(x_pred + 1e-20)
+    return th.sum(loss)
+
+
+import numpy as np
+class NormalNLLLoss:
+    """
+    Calculate the negative log likelihood
+    of normal distribution.
+    This needs to be minimised.
+
+    Treating Q(cj | x) as a factored Gaussian.
+    """
+
+    def __call__(self, x, mu, var):
+        logli = -0.5 * (var.mul(2 * np.pi) + 1e-6).log() - (x - mu).pow(2).div(var.mul(2.0) + 1e-6)
+        nll = -(logli.sum(1))
+
+        return nll

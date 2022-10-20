@@ -39,7 +39,7 @@ def main(local_rank):
 
     log_folder = os.path.join(
         args.logdir,
-        datetime.datetime.now().strftime("openai-%Y-%m-%d-%H-%M-%S-%f"),
+        "logs"
     )
     if dist.get_rank() == 0:
         logger.configure(log_folder, rank=dist.get_rank())
@@ -165,20 +165,20 @@ def main(local_rank):
         for i, (sub_batch, sub_batch_noises, sub_gt_labels, sub_t) in enumerate(
             split_microbatches(args.microbatch, batch, batch_noise, labels ,t)
         ):
-            model.eval()
-            pseudo_labels = model(sub_batch, timesteps=t_clean).detach()
-            model.train()
-            logits = model(sub_batch_noises, timesteps=sub_t)
+            # model.eval()
+            clean_logits = model(sub_batch, timesteps=t_clean)
+            # model.train()
+            noise_logits = model(sub_batch_noises, timesteps=sub_t)
 
-            loss = kdloss(logits, pseudo_labels)
+            loss = kdloss(noise_logits, clean_logits.detach())
 
             losses = {}
             losses[f"{prefix}_loss"] = loss.detach()
-            losses[f"{prefix}_kd_acc@1"] = compute_top_k_kd(
-                logits, pseudo_labels, k=1, reduction="none"
-            )
-            losses[f"{prefix}_acc@1"] = compute_top_k(logits, sub_gt_labels, k=1,
-                                                      reduction="none")
+            # losses[f"{prefix}_kd_acc@1"] = compute_top_k_kd(
+            #     noise_logits, clean_logits, k=1, reduction="none"
+            # )
+            # losses[f"{prefix}_acc@1"] = compute_top_k(noise_logits, sub_gt_labels, k=1,
+            #                                           reduction="none")
             # losses[f"{prefix}_acc@5"] = compute_top_k(
             #     logits, sub_labels, k=5, reduction="none"
             # )

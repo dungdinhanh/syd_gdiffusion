@@ -15,7 +15,7 @@ if [ ! -z $3 ]
 then
 limit=$3
 else
-  limit=30
+  limit=25
 fi
 workspace="gdiffusion"
 
@@ -31,11 +31,11 @@ file_opt="runs/${folder}/models/${optm}0000.pt"
 #
 cmd="hfai workspace download ${file_model}"
 echo ${cmd}
-eval ${cmd}
+#eval ${cmd}
 
 cmd="hfai workspace download ${file_opt}"
 echo ${cmd}
-eval ${cmd}
+#eval ${cmd}
 
 cmd="hfai workspace remove ${workspace} -f ${file_model} --yes "
 echo ${cmd}
@@ -52,9 +52,9 @@ done
 outside_folder="../outputhfai/runs/${folder}"
 cmd="mkdir ${outside_folder}"
 echo ${cmd}
-eval ${cmd}
+#eval ${cmd}
 
 cmd="mv runs/${folder}/models/* ${outside_folder}"
 echo ${cmd}
-eval ${cmd}
+#eval ${cmd}
 

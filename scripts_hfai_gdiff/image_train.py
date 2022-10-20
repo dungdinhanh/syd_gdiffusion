@@ -43,7 +43,7 @@ def main(local_rank):
     logger.log("creating data loader...")
     data = load_data_imagenet_hfai(
         train=True, image_size=args.image_size,
-        batch_size=args.batch_size, random_crop=True
+        batch_size=args.batch_size, random_crop=True, class_cond=args.class_cond
     )
 
     logger.log("training...")
@@ -82,6 +82,7 @@ def create_argparser():
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
+        logdir="runs"
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

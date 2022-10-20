@@ -14,6 +14,6 @@ echo ${cmd}
 eval ${cmd}
 
 
-cmd="python scripts_hfai_gdiff/classifier_train.py --data_dir path/to/imagenet --logdir runs/classifier_training_4nodes/ $TRAIN_FLAGS $CLASSIFIER_FLAGS"
+cmd="python scripts_hfai_gdiff/classifier_train.py --data_dir path/to/imagenet --logdir runs/classifier_training_4nodes_rt/ $TRAIN_FLAGS $CLASSIFIER_FLAGS"
 echo ${cmd}
 eval ${cmd}

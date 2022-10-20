@@ -33,7 +33,7 @@ def main(local_rank):
 
     save_folder = os.path.join(
         args.logdir,
-        datetime.datetime.now().strftime("openai-%Y-%m-%d-%H-%M-%S-%f"),
+        "logs",
     )
 
     logger.configure(save_folder, rank=dist.get_rank())
@@ -87,10 +87,16 @@ def main(local_rank):
         all_images = []
         all_labels = []
     logger.log("sampling...")
+    if args.image_size == 28:
+        img_channels = 1
+        num_class = 10
+    else:
+        img_channels = 3
+        num_class = NUM_CLASSES
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = {}
         classes = th.randint(
-            low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev()
+            low=0, high=num_class, size=(args.batch_size,), device=dist_util.dev()
         )
         model_kwargs["y"] = classes
         sample_fn = (
@@ -98,7 +104,7 @@ def main(local_rank):
         )
         sample = sample_fn(
             model_fn,
-            (args.batch_size, 3, args.image_size, args.image_size),
+            (args.batch_size, img_channels, args.image_size, args.image_size),
             clip_denoised=args.clip_denoised,
             model_kwargs=model_kwargs,
             cond_fn=cond_fn,

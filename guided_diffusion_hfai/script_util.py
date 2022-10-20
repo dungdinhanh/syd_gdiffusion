@@ -145,6 +145,8 @@ def create_model(
     use_fp16=False,
     use_new_attention_order=False,
 ):
+    in_channels=3
+    out_channels = (3 if not learn_sigma else 6)
     if channel_mult == "":
         if image_size == 512:
             channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
@@ -156,6 +158,10 @@ def create_model(
             channel_mult = (1, 2, 3, 4)
         elif image_size == 32:
             channel_mult = (1, 2, 2, 2)
+        elif image_size == 28:
+            channel_mult = (1, 2, 2)
+            in_channels = 1
+            out_channels = 1
         else:
             raise ValueError(f"unsupported image size: {image_size}")
     else:
@@ -167,9 +173,9 @@ def create_model(
 
     return UNetModel(
         image_size=image_size,
-        in_channels=3,
+        in_channels=in_channels,
         model_channels=num_channels,
-        out_channels=(3 if not learn_sigma else 6),
+        out_channels= out_channels,
         num_res_blocks=num_res_blocks,
         attention_resolutions=tuple(attention_ds),
         dropout=dropout,
@@ -212,7 +218,7 @@ def create_classifier_and_diffusion(
         classifier_attention_resolutions,
         classifier_use_scale_shift_norm,
         classifier_resblock_updown,
-        classifier_pool,
+        classifier_pool
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -226,6 +232,116 @@ def create_classifier_and_diffusion(
     )
     return classifier, diffusion
 
+def create_classifier_and_diffusion_infodiff(
+    image_size,
+    classifier_use_fp16,
+    classifier_width,
+    classifier_depth,
+    classifier_attention_resolutions,
+    classifier_use_scale_shift_norm,
+    classifier_resblock_updown,
+    classifier_pool,
+    learn_sigma,
+    diffusion_steps,
+    noise_schedule,
+    timestep_respacing,
+    use_kl,
+    predict_xstart,
+    rescale_timesteps,
+    rescale_learned_sigmas,
+        output_channels=12
+):
+    classifier = create_classifier_infodiff(
+        image_size,
+        classifier_use_fp16,
+        classifier_width,
+        classifier_depth,
+        classifier_attention_resolutions,
+        classifier_use_scale_shift_norm,
+        classifier_resblock_updown,
+        classifier_pool, out_channels=output_channels
+    )
+    diffusion = create_gaussian_diffusion(
+        steps=diffusion_steps,
+        learn_sigma=learn_sigma,
+        noise_schedule=noise_schedule,
+        use_kl=use_kl,
+        predict_xstart=predict_xstart,
+        rescale_timesteps=rescale_timesteps,
+        rescale_learned_sigmas=rescale_learned_sigmas,
+        timestep_respacing=timestep_respacing,
+    )
+    return classifier, diffusion
+
+from guided_diffusion_hfai.infogan.mnist_model import *
+
+def weights_init(m):
+    """
+    Initialise weights of the model.
+    """
+    if(type(m) == nn.ConvTranspose2d or type(m) == nn.Conv2d):
+        nn.init.normal_(m.weight.data, 0.0, 0.02)
+    elif(type(m) == nn.BatchNorm2d):
+        nn.init.normal_(m.weight.data, 1.0, 0.02)
+        nn.init.constant_(m.bias.data, 0)
+
+def create_infoq(pretrained=True):
+    netD = Discriminator()
+    netD.apply(weights_init)
+    netQ = QHead()
+    netQ.apply(weights_init)
+    if pretrained:
+        pretrained_path = "models/model_epoch_100_MNIST.pt"
+        checkpoint = torch.load(pretrained_path, map_location='cpu')
+        netD.load_state_dict(checkpoint['discriminator'])
+        netQ.load_state_dict(checkpoint['netQ'])
+    netDQ = DQNet(netD, netQ)
+    return netDQ
+
+def create_classifierinfoq_and_diffusion_infodiff(
+    image_size,
+    classifier_use_fp16,
+    classifier_width,
+    classifier_depth,
+    classifier_attention_resolutions,
+    classifier_use_scale_shift_norm,
+    classifier_resblock_updown,
+    classifier_pool,
+    learn_sigma,
+    diffusion_steps,
+    noise_schedule,
+    timestep_respacing,
+    use_kl,
+    predict_xstart,
+    rescale_timesteps,
+    rescale_learned_sigmas,
+        output_channels=14
+):
+    classifier_noise = create_classifier_infodiff(
+        image_size,
+        classifier_use_fp16,
+        classifier_width,
+        classifier_depth,
+        classifier_attention_resolutions,
+        classifier_use_scale_shift_norm,
+        classifier_resblock_updown,
+        classifier_pool, out_channels=output_channels
+    )
+
+    classifier_clean = create_infoq(True)
+
+
+    diffusion = create_gaussian_diffusion(
+        steps=diffusion_steps,
+        learn_sigma=learn_sigma,
+        noise_schedule=noise_schedule,
+        use_kl=use_kl,
+        predict_xstart=predict_xstart,
+        rescale_timesteps=rescale_timesteps,
+        rescale_learned_sigmas=rescale_learned_sigmas,
+        timestep_respacing=timestep_respacing,
+    )
+    return classifier_noise, classifier_clean, diffusion
 
 def create_classifier(
     image_size,
@@ -236,7 +352,10 @@ def create_classifier(
     classifier_use_scale_shift_norm,
     classifier_resblock_updown,
     classifier_pool,
+    out_channels=1000,
+    num_head_channels=64
 ):
+    in_channels = 3
     if image_size == 512:
         channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
     elif image_size == 256:
@@ -245,6 +364,13 @@ def create_classifier(
         channel_mult = (1, 1, 2, 3, 4)
     elif image_size == 64:
         channel_mult = (1, 2, 3, 4)
+    elif image_size == 32:
+        channel_mult = (1, 2, 2, 2)
+    elif image_size == 28:
+        channel_mult = (1, 2, 2)
+        in_channels = 1
+        out_channels = 10
+        num_head_channels = 8
     else:
         raise ValueError(f"unsupported image size: {image_size}")
 
@@ -254,14 +380,63 @@ def create_classifier(
 
     return EncoderUNetModel(
         image_size=image_size,
-        in_channels=3,
+        in_channels=in_channels,
         model_channels=classifier_width,
-        out_channels=1000,
+        out_channels=out_channels,
         num_res_blocks=classifier_depth,
         attention_resolutions=tuple(attention_ds),
         channel_mult=channel_mult,
         use_fp16=classifier_use_fp16,
-        num_head_channels=64,
+        num_head_channels=num_head_channels,
+        use_scale_shift_norm=classifier_use_scale_shift_norm,
+        resblock_updown=classifier_resblock_updown,
+        pool=classifier_pool,
+    )
+
+def create_classifier_infodiff(
+    image_size,
+    classifier_use_fp16,
+    classifier_width,
+    classifier_depth,
+    classifier_attention_resolutions,
+    classifier_use_scale_shift_norm,
+    classifier_resblock_updown,
+    classifier_pool,
+    out_channels=12,
+    num_head_channels=64
+):
+    in_channels = 3
+    if image_size == 512:
+        channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
+    elif image_size == 256:
+        channel_mult = (1, 1, 2, 2, 4, 4)
+    elif image_size == 128:
+        channel_mult = (1, 1, 2, 3, 4)
+    elif image_size == 64:
+        channel_mult = (1, 2, 3, 4)
+    elif image_size == 32:
+        channel_mult = (1, 2, 2, 2)
+    elif image_size == 28:
+        channel_mult = (1, 2, 2)
+        in_channels = 1
+        num_head_channels = 8
+    else:
+        raise ValueError(f"unsupported image size: {image_size}")
+
+    attention_ds = []
+    for res in classifier_attention_resolutions.split(","):
+        attention_ds.append(image_size // int(res))
+
+    return EncoderUNetModel(
+        image_size=image_size,
+        in_channels=in_channels,
+        model_channels=classifier_width,
+        out_channels=out_channels,
+        num_res_blocks=classifier_depth,
+        attention_resolutions=tuple(attention_ds),
+        channel_mult=channel_mult,
+        use_fp16=classifier_use_fp16,
+        num_head_channels=num_head_channels,
         use_scale_shift_norm=classifier_use_scale_shift_norm,
         resblock_updown=classifier_resblock_updown,
         pool=classifier_pool,
@@ -452,3 +627,5 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError("boolean value expected")
+
+

@@ -24,6 +24,18 @@ def kdloss(y, teacher_scores, temperature=3):
     l_kl = torch.sum(l_kl, dim=1)
     return l_kl
 
+def kdloss_gb(y, teacher_scores, temperature=3):
+    """
+    Loss used for previous KD experiments
+    """
+    p = F.log_softmax(y / temperature, dim=1)
+    q = F.gumbel_softmax(teacher_scores / temperature, tau=0.1, hard=False, dim=1)
+    # l_kl = F.kl_div(p, q, size_average=False) / y.shape[0]
+    # l_kl = F.kl_div(p, q, reduction='batchmean')
+    l_kl = F.kl_div(p, q, reduction="none")
+    l_kl = torch.sum(l_kl, dim=1)
+    return l_kl
+
 
 def normal_kl(mean1, logvar1, mean2, logvar2):
     """
