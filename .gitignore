@@ -6,5 +6,4 @@ models/
 dist/
 guided_diffusion.egg-info/
 .idea/
-.hfai/
 data/
