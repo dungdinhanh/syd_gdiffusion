@@ -201,7 +201,7 @@ class TrainLoop:
                 # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     return
-            if self.step % 1000 == 0:
+            if self.step % 1000 == 0 and self.step != 0:
                 self.save(latest=True)
             elif self.suspend_signal():
                 self.save(latest=True)

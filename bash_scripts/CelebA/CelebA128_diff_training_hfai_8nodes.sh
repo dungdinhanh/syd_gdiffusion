@@ -3,7 +3,7 @@
 MODEL_FLAGS="--image_size 128 --num_channels 256 --num_res_blocks 2 --resblock_updown True \
 --use_new_attention_order True --use_fp16 True --use_scale_shift_norm True"
 DIFFUSION_FLAGS="--diffusion_steps 1000 --noise_schedule linear"
-TRAIN_FLAGS="--lr 3e-4 --batch_size 16 --lr_anneal_steps 400000 --dropout 0.0 --attention_resolutions 32,16,8 \
+TRAIN_FLAGS="--lr 5e-4 --batch_size 16 --lr_anneal_steps 500000 --dropout 0.0 --attention_resolutions 32,16,8 \
  --num_heads 4 --learn_sigma True"
 
 cmd="cd ../../"
