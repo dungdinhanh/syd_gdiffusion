@@ -15,7 +15,7 @@ echo ${cmd}
 eval ${cmd}
 
 
-cmd="python scripts_hfai_local/info/classifier_localtrain_info_mnist_schm7.py --data_dir path/to/imagenet \
---logdir ../outputhfai/local_analyse/scheme7/info_schm7/ $TRAIN_FLAGS $CLASSIFIER_FLAGS"
+cmd="python scripts_hfai_local/info/classifier_localtrain_info_mnist_schm15.py --data_dir path/to/imagenet \
+--logdir ../outputhfai/local_analyse/twostages/info_schm15/ $TRAIN_FLAGS $CLASSIFIER_FLAGS"
 echo ${cmd}
 eval ${cmd}
