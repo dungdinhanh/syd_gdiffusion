@@ -3,10 +3,6 @@ from ffrecord.torch import DataLoader
 from guided_diffusion_hfai.vision_images import *
 
 
-
-
-
-
 def load_data_imagenet_hfai(
     *,
     train=True,
@@ -102,17 +98,61 @@ def load_dataset_MNIST_nosampler(*,
         yield from loader
 
 def load_dataset_CelebA_nosampler(*,
-                        train=True,
-                        batch_size,
-                        class_cond=True):
+                                  train=True,
+                                  batch_size,
+                                  class_cond=True,
+                                  random_crop=False,
+                                  random_flip=True,
+                                  image_size):
 
     os.makedirs("./data", exist_ok=True)
     if train:
-        dataset = CelebAHF(classes=class_cond, split='train')
+        dataset = CelebALocal(root="../data_local/", classes=class_cond, split='train', resolution=image_size,
+                           random_crop=random_crop, random_flip=random_flip)
     else:
-        dataset = CelebAHF(classes=class_cond, split='val')
+        dataset = CelebALocal(root="../data_local/", classes=class_cond, split='val', resolution=image_size,
+                           random_crop=random_crop, random_flip=random_flip)
     # data_sampler = DistributedSampler(dataset, shuffle=True)
     loader = DataLoader(dataset, batch_size, num_workers=8, shuffle=True)
+    while True:
+        yield from loader
+
+
+def load_dataset_CelebA(*,
+                        train=True,
+                        batch_size,
+                        class_cond=True,
+                        random_crop=False,
+                        random_flip=True,
+                        image_size):
+    os.makedirs("./data", exist_ok=True)
+    if train:
+        dataset = CelebAHF(root="./data/", classes=class_cond, split='train', resolution=image_size,
+                           random_crop=random_crop, random_flip=random_flip)
+    else:
+        dataset = CelebAHF(root="./data/", classes=class_cond, split='val', resolution=image_size,
+                           random_crop=random_crop, random_flip=random_flip)
+    data_sampler = DistributedSampler(dataset, shuffle=True)
+    loader = dataset.loader(batch_size, num_workers=8, sampler=data_sampler, pin_memory=True)
+    while True:
+        yield from loader
+
+def load_dataset_CelebA64(*,
+                        train=True,
+                        batch_size,
+                        class_cond=True,
+                        random_crop=False,
+                        random_flip=True,
+                        image_size):
+    os.makedirs("./data", exist_ok=True)
+    if train:
+        dataset = CelebA64HF(root="./data/", classes=class_cond, split='train', resolution=image_size,
+                           random_crop=random_crop, random_flip=random_flip)
+    else:
+        dataset = CelebA64HF(root="./data/", classes=class_cond, split='val', resolution=image_size,
+                           random_crop=random_crop, random_flip=random_flip)
+    data_sampler = DistributedSampler(dataset, shuffle=True)
+    loader = dataset.loader(batch_size, num_workers=8, sampler=data_sampler, pin_memory=True)
     while True:
         yield from loader
 

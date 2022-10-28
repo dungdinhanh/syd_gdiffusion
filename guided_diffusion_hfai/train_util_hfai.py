@@ -1,5 +1,6 @@
 import copy
 import functools
+import glob
 import os
 
 import blobfile as bf
@@ -15,6 +16,8 @@ from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
+# from hfai.checkpoint import load
+from guided_diffusion_hfai.hfai_checkpoint_support import save_state, load
 import time
 
 # For ImageNet experiments, this was a good default value.
@@ -126,25 +129,17 @@ class TrainLoop:
 
         if resume_checkpoint:
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint) + 1
-            if dist.get_rank() == 0:
-                logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
-                self.model.load_state_dict(
-                    dist_util.load_state_dict(
-                        resume_checkpoint, map_location=dist_util.dev()
-                    )
-                )
+            self.state_load_state_dict = load(resume_checkpoint, map_location='cpu')
+            logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
+            self.model.load_state_dict(self.state_load_state_dict['model'])
             self.load_last_checkpoint = False
         else:
             last_checkpoint = find_resume_checkpoint(self.logdir)
             if last_checkpoint is not None:
+                self.state_load_state_dict = load(last_checkpoint, map_location='cpu')
+                logger.log(f"Loading model from latest checkpoint: {last_checkpoint}")
+                self.model.load_state_dict(self.state_load_state_dict['model'])
                 self.load_last_checkpoint = True
-                if dist.get_rank() == 0:
-                    logger.log(f"Loading model from latest checkpoint: {last_checkpoint}")
-                    self.model.load_state_dict(
-                        dist_util.load_state_dict(
-                            last_checkpoint
-                        )
-                    )
             else:
                 self.load_last_checkpoint = False
                 logger.log(f"Do not load any checkpoint/train from scratch!")
@@ -156,24 +151,18 @@ class TrainLoop:
         main_checkpoint = self.resume_checkpoint
         ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.resume_step, rate)
         if ema_checkpoint:
-            if dist.get_rank() == 0:
-                logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
-                state_dict = dist_util.load_state_dict(
-                    ema_checkpoint, map_location=dist_util.dev()
-                )
-                ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
+            logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
+            state_dict = load(ema_checkpoint, map_location='cpu')['model']
+            ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
         else:
             if self.load_last_checkpoint:
                 ema_latest = find_last_ema_checkpoint(self.logdir, rate)
                 if ema_latest is None:
                     logger.log(f"No latest ema checkpoint found - Exiting")
                     exit(0)
-                if dist.get_rank() == 0:
-                    logger.log(f"Loading EMA from latest checkpoint: ${ema_latest}...")
-                    state_dict = dist_util.load_state_dict(
-                        ema_latest
-                    )
-                    ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
+                logger.log(f"Loading EMA from latest checkpoint: ${ema_latest}...")
+                state_dict = load(ema_latest, map_location='cpu')['model']
+                ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
         for i in range(len(ema_params)):
             ema_params[i] = ema_params[i].to(dist_util.dev())
         dist_util.sync_params(ema_params)
@@ -186,24 +175,17 @@ class TrainLoop:
         )
         if bf.exists(opt_checkpoint):
             logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
-            state_dict = dist_util.load_state_dict(
-                opt_checkpoint, map_location=dist_util.dev()
-            )
-            self.opt.load_state_dict(state_dict)
+            self.opt.load_state_dict(self.state_load_state_dict['optimizer'])
+            self.resume_step = self.state_load_state_dict['step'] + 1
+            logger.log(f"Train from {self.resume_step}")
         else:
             if self.load_last_checkpoint:
-                opt_lastest = os.path.join(self.logdir, "optlatest.pt")
-                if os.path.isfile(opt_lastest):
-                    logger.log(f"Loading optimizer state from latest checkpoint: {opt_lastest}")
-                    state_dict = dist_util.load_state_dict(
-                        opt_lastest
-                    )
-                    self.opt.load_state_dict(state_dict['opt'])
-                    self.resume_step = state_dict['step'] + 1
-                    logger.log(f"Train from {self.resume_step}")
-                else:
-                    logger.log(f"Can not load latest optimizer - file not found: {opt_lastest} - Exiting")
-                    exit(0)
+                logger.log(f"Loading optimizer state from latest checkpoint")
+                self.opt.load_state_dict(self.state_load_state_dict['optimizer'])
+                self.resume_step = self.state_load_state_dict['step'] + 1
+                logger.log(f"Train from {self.resume_step}")
+        self.state_load_state_dict = None
+
 
     def run_loop(self):
         while (
@@ -215,16 +197,28 @@ class TrainLoop:
             if self.step % self.log_interval == 0:
                 logger.dumpkvs()
             if (self.step + self.resume_step) % self.save_interval == 0 and self.step > 0:
-                self.save()
+                self.save_final()
                 # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     return
-            if self.step % 500 == 0 and self.step > 0:
+            if self.step % 1000 == 0:
                 self.save(latest=True)
+            elif self.suspend_signal():
+                self.save(latest=True)
+                logger.log(f"step {self.step + self.resume_step}, client has suspended. Good luck next run ^^")
+                if dist.get_rank() == 0:
+                    hfai.client.go_suspend()
             self.step += 1
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
-            self.save()
+            self.save_final()
+
+    def suspend_signal(self):
+        receive_suspend = hfai.client.receive_suspend_command()
+        signal = th.tensor(receive_suspend).bool().cuda()
+        dist.broadcast(signal, src=0)
+        receive_suspend = signal.item()
+        return receive_suspend
 
     def run_step(self, batch, cond):
         self.forward_backward(batch, cond)
@@ -287,46 +281,80 @@ class TrainLoop:
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
 
     def save(self, latest=False):
-        def save_checkpoint(rate, params):
+        def save_checkpoint(rate, params, optimizer):
+            state_dict = self.mp_trainer.master_params_to_state_dict(params)
+            if dist.get_rank() == 0:
+                logger.log(f"saving model {rate}...")
+            if not rate:
+                filename = f"model{(self.step+self.resume_step):06d}.pt"
+            else:
+                filename = f"ema_{rate}_{(self.step+self.resume_step):06d}.pt"
+            save_file_path = os.path.join(self.logdir, filename)
+            save_state(save_file_path, state_dict, self.mp_trainer.model, optimizer, others={'step': self.step + self.resume_step})
+
+        def save_latest(rate, params, optimizer):
+            state_dict = self.mp_trainer.master_params_to_state_dict(params)
+            if dist.get_rank() == 0:
+                logger.log(f"saving model {rate}...")
+            if not rate:
+                filename = f"latest.pt"
+            else:
+                filename = f"ema_{rate}_latest.pt"
+                optimizer = None
+            save_file_path = os.path.join(self.logdir, filename)
+            save_state(save_file_path, state_dict, self.mp_trainer.model, optimizer, others={'step': self.step + self.resume_step})
+        if not latest:
+            save_checkpoint(0, self.mp_trainer.master_params, self.opt)
+            for rate, params in zip(self.ema_rate, self.ema_params):
+                save_checkpoint(rate, params, None)
+        else:
+            save_latest(0, self.mp_trainer.master_params, self.opt)
+            for rate, params in zip(self.ema_rate, self.ema_params):
+                save_latest(rate, params, None)
+        # remove_temp_mark(self.logdir)
+        dist.barrier()
+
+    def save_final(self, latest=False):
+        def save_checkpoint_final(rate, params):
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
             if dist.get_rank() == 0:
                 logger.log(f"saving model {rate}...")
                 if not rate:
-                    filename = f"model{(self.step+self.resume_step):06d}.pt"
+                    filename = f"model{(self.step+self.resume_step):06d}_final.pt"
                 else:
-                    filename = f"ema_{rate}_{(self.step+self.resume_step):06d}.pt"
+                    filename = f"ema_{rate}_{(self.step+self.resume_step):06d}_final.pt"
                 with bf.BlobFile(bf.join(self.logdir, filename), "wb") as f:
                     th.save(state_dict, f)
 
-        def save_latest(rate, params):
+        def save_latest_final(rate, params):
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
             if dist.get_rank() == 0:
                 logger.log(f"saving model {rate}...")
                 if not rate:
-                    filename = f"latest.pt"
+                    filename = f"final.pt"
                 else:
-                    filename = f"ema_{rate}_latest.pt"
+                    filename = f"ema_{rate}_final.pt"
                 with bf.BlobFile(bf.join(self.logdir, filename), "wb") as f:
                     th.save(state_dict, f)
         if not latest:
-            save_checkpoint(0, self.mp_trainer.master_params)
+            save_checkpoint_final(0, self.mp_trainer.master_params)
             for rate, params in zip(self.ema_rate, self.ema_params):
-                save_checkpoint(rate, params)
+                save_checkpoint_final(rate, params)
 
             if dist.get_rank() == 0:
                 with bf.BlobFile(
-                    bf.join(self.logdir, f"opt{(self.step + self.resume_step):06d}.pt"),
+                    bf.join(self.logdir, f"opt{(self.step + self.resume_step):06d}_final.pt"),
                     "wb",
                 ) as f:
                     th.save(self.opt.state_dict(), f)
         else:
-            save_latest(0, self.mp_trainer.master_params)
+            save_latest_final(0, self.mp_trainer.master_params)
             for rate, params in zip(self.ema_rate, self.ema_params):
-                save_latest(rate, params)
+                save_latest_final(rate, params)
 
             if dist.get_rank() == 0:
                 with bf.BlobFile(
-                        bf.join(self.logdir, f"optlatest.pt"),
+                        bf.join(self.logdir, f"optlatest_final.pt"),
                         "wb",
                 ) as f:
                     th.save({'opt': self.opt.state_dict(),
@@ -334,53 +362,21 @@ class TrainLoop:
 
         dist.barrier()
 
-    def save_hfai(self, latest=False):
-        def save_checkpointh(rate, params):
-            state_dict = self.mp_trainer.master_params_to_state_dict(params)
-            if dist.get_rank() == 0:
-                logger.log(f"saving model {rate}...")
-                if not rate:
-                    filename = f"model{(self.step+self.resume_step):06d}.pt"
-                else:
-                    filename = f"ema_{rate}_{(self.step+self.resume_step):06d}.pt"
-                with bf.BlobFile(bf.join(self.logdir, filename), "wb") as f:
-                    th.save(state_dict, f)
 
-        def save_latesth(rate, params):
-            state_dict = self.mp_trainer.master_params_to_state_dict(params)
-            if dist.get_rank() == 0:
-                logger.log(f"saving model {rate}...")
-                if not rate:
-                    filename = f"latest.pt"
-                else:
-                    filename = f"ema_{rate}_latest.pt"
-                with bf.BlobFile(bf.join(self.logdir, filename), "wb") as f:
-                    th.save(state_dict, f)
-        if not latest:
-            save_checkpointh(0, self.mp_trainer.master_params)
-            for rate, params in zip(self.ema_rate, self.ema_params):
-                save_checkpointh(rate, params)
+def remove_temp_mark(save_folder):
+    list_temp_files = list(glob.glob(os.path.join(save_folder, "*_temp.pt")))
+    list_new_files = remove_temp_mark_str(list_temp_files)
+    for i in range(len(list_new_files)):
+        os.rename(list_temp_files[i], list_new_files[i])
 
-            if dist.get_rank() == 0:
-                with bf.BlobFile(
-                    bf.join(self.logdir, f"opt{(self.step + self.resume_step):06d}.pt"),
-                    "wb",
-                ) as f:
-                    th.save(self.opt.state_dict(), f)
-        else:
-            save_latesth(0, self.mp_trainer.master_params)
-            for rate, params in zip(self.ema_rate, self.ema_params):
-                save_latesth(rate, params)
 
-            if dist.get_rank() == 0:
-                with bf.BlobFile(
-                        bf.join(self.logdir, f"optlatest.pt"),
-                        "wb",
-                ) as f:
-                    th.save({'opt': self.opt.state_dict(),
-                             'step': self.step + self.resume_step}, f)
-
-        dist.barrier()
+def remove_temp_mark_str(list_files):
+    new_list_files = []
+    for file in list_files:
+        new_file = file[:-8] + ".pt"
+        new_list_files.append(new_file)
+    return new_list_files
+    pass
 
 
 def parse_resume_step_from_filename(filename):
@@ -408,7 +404,7 @@ def find_resume_checkpoint(logdir):
     # On your infrastructure, you may want to override this to automatically
     # discover the latest checkpoint on your blob storage, etc.
     latest_checkpoint = os.path.join(logdir, "latest.pt")
-    if os.path.isfile(latest_checkpoint):
+    if os.path.isdir(latest_checkpoint) or os.path.isfile(latest_checkpoint):
         return latest_checkpoint
     return None
 
@@ -421,6 +417,7 @@ def find_ema_checkpoint(main_checkpoint, step, rate):
     if bf.exists(path):
         return path
     return None
+
 
 def find_last_ema_checkpoint(logdir, rate):
     if logdir is None:
@@ -446,6 +443,7 @@ def model_entropy(x_pred):
     loss = x_pred * th.log(x_pred + 1e-20)
     return th.sum(loss)
 
-
-import numpy as np
-
+# if __name__ == '__main__':
+#     list_files = ["home/abc//runs/latest_temp.opt", "home/abc//runs/ema_0.9999_latest_temp.opt"]
+#     new_files = remove_temp_mark_str(list_files)
+#     print(new_files)

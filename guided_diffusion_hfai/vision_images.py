@@ -1,9 +1,8 @@
 import math
 import os
 import random
-
 from PIL import Image
-import pickle
+import io
 import blobfile as bf
 from hfai.datasets.base import (
     BaseDataset,
@@ -14,11 +13,19 @@ from urllib.error import URLError
 import numpy as np
 from torch.utils.data import  Dataset
 from hfai.datasets.imagenet import ImageNet
-
 from torchvision.datasets.mnist import read_image_file, read_label_file
 import warnings
 from torchvision.datasets.utils import download_and_extract_archive, extract_archive, verify_str_arg, check_integrity
-from torchvision.datasets.celeba import *
+from torchvision.datasets.celeba import CSV
+from torchvision.transforms import transforms
+from collections import namedtuple
+import csv
+from functools import partial
+import torch
+import PIL
+from typing import Any, Callable, List, Optional, Union, Tuple
+from torchvision.datasets.vision import VisionDataset
+from torchvision.datasets.utils import download_file_from_google_drive, check_integrity, verify_str_arg
 
 
 class ImageDataset(Dataset):
@@ -300,7 +307,408 @@ class MNISTHF(BaseDataset):
             transformed_samples.append((img, out_dict))
         return transformed_samples
 
+
+from datasets.ffrecord_support import *
+
+
 class CelebAHF(BaseDataset):
+    """`Large-scale CelebFaces Attributes (CelebA) Dataset <http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html>`_ Dataset.
+
+    Args:
+        root (string): Root directory where images are downloaded to.
+        split (string): One of {'train', 'valid', 'test', 'all'}.
+            Accordingly dataset is selected.
+        target_type (string or list, optional): Type of target to use, ``attr``, ``identity``, ``bbox``,
+            or ``landmarks``. Can also be a list to output a tuple with all specified target types.
+            The targets represent:
+
+                - ``attr`` (np.array shape=(40,) dtype=int): binary (0, 1) labels for attributes
+                - ``identity`` (int): label for each person (data points with the same identity are the same person)
+                - ``bbox`` (np.array shape=(4,) dtype=int): bounding box (x, y, width, height)
+                - ``landmarks`` (np.array shape=(10,) dtype=int): landmark points (lefteye_x, lefteye_y, righteye_x,
+                  righteye_y, nose_x, nose_y, leftmouth_x, leftmouth_y, rightmouth_x, rightmouth_y)
+
+            Defaults to ``attr``. If empty, ``None`` will be returned as target.
+
+        transform (callable, optional): A function/transform that  takes in an PIL image
+            and returns a transformed version. E.g, ``transforms.ToTensor``
+        target_transform (callable, optional): A function/transform that takes in the
+            target and transforms it.
+        download (bool, optional): If true, downloads the dataset from the internet and
+            puts it in root directory. If dataset is already downloaded, it is not
+            downloaded again.
+    """
+
+    base_folder = "celeba"
+    # There currently does not appear to be a easy way to extract 7z in python (without introducing additional
+    # dependencies). The "in-the-wild" (not aligned+cropped) images are only in 7z, so they are not available
+    # right now.
+    file_list = [
+        # File ID                                      MD5 Hash                            Filename
+        # ("0B7EVK8r0v71pZjFTYXZWM3FlRnM", "00d2c5bc6d35e252742224ab0c1e8fcb", "img_align_celeba.zip"),
+        # ("0B7EVK8r0v71pbWNEUjJKdDQ3dGc","b6cd7e93bc7a96c2dc33f819aa3ac651", "img_align_celeba_png.7z"),
+        # ("0B7EVK8r0v71peklHb0pGdDl6R28", "b6cd7e93bc7a96c2dc33f819aa3ac651", "img_celeba.7z"),
+        ("0B7EVK8r0v71pblRyaVFSWGxPY0U", "75e246fa4810816ffd6ee81facbd244c", "list_attr_celeba.txt"),
+        ("1_ee_0u7vcNLOfNLegJRHmolfH5ICW-XS", "32bd1bd63d3c78cd57e08160ec5ed1e2", "identity_CelebA.txt"),
+        ("0B7EVK8r0v71pbThiMVRxWXZ4dU0", "00566efa6fedff7a56946cd1c10f1c16", "list_bbox_celeba.txt"),
+        ("0B7EVK8r0v71pd0FJY3Blby1HUTQ", "cc24ecafdb5b50baae59b03474781f8c", "list_landmarks_align_celeba.txt"),
+        # ("0B7EVK8r0v71pTzJIdlJWdHczRlU", "063ee6ddb681f96bc9ca28c6febb9d1a", "list_landmarks_celeba.txt"),
+        ("0B7EVK8r0v71pY0NSMzRuSXJEVkk", "d32c9cbf5e040fd4025c592c306e6668", "list_eval_partition.txt"),
+    ]
+
+    def __init__(
+            self,
+            root: str,
+            resolution,
+            random_crop=False,
+            random_flip=True,
+            split: str = "train",
+            target_type: Union[List[str], str] = "attr",
+            classes=False
+    ) -> None:
+        super(CelebAHF, self).__init__()
+        image_file = os.path.join(get_data_dir(), "/private_dataset/CelebA/celeba.ffr")
+        self.root = root
+        # read from celeba.ffr
+        self.reader_celeb = PackedFolder(image_file)
+        self.images_folder = "img_align_celeba"
+        #
+        self.resolution = resolution
+        self.random_crop = random_crop
+        self.random_flip = random_flip
+        self.transform = transforms.Compose([
+            transforms.Resize(self.resolution),
+            transforms.CenterCrop(self.resolution),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5),
+                (0.5, 0.5, 0.5))])
+        self.split = split
+        self.classes = classes
+        if isinstance(target_type, list):
+            self.target_type = target_type
+        else:
+            self.target_type = [target_type]
+
+        if not self.target_type and self.target_transform is not None:
+            raise RuntimeError('target_transform is specified but target_type is empty')
+
+        if not self._check_integrity():
+            raise RuntimeError('Dataset not found or corrupted.' +
+                               ' You can use download=True to download it')
+
+        split_map = {
+            "train": 0,
+            "valid": 1,
+            "test": 2,
+            "all": None,
+        }
+        split_ = split_map[verify_str_arg(split.lower(), "split",
+                                          ("train", "valid", "test", "all"))]
+        splits = self._load_csv("list_eval_partition.txt")
+        identity = self._load_csv("identity_CelebA.txt")
+        bbox = self._load_csv("list_bbox_celeba.txt", header=1)
+        landmarks_align = self._load_csv("list_landmarks_align_celeba.txt", header=1)
+        attr = self._load_csv("list_attr_celeba.txt", header=1)
+
+        mask = slice(None) if split_ is None else (splits.data == split_).squeeze()
+
+        self.filename = splits.index
+        self.identity = identity.data[mask]
+        self.bbox = bbox.data[mask]
+        self.landmarks_align = landmarks_align.data[mask]
+        self.attr = attr.data[mask]
+        # map from {-1, 1} to {0, 1}
+        self.attr = torch.div(self.attr + 1, 2, rounding_mode='floor')
+        self.attr_names = attr.header
+
+    def _load_csv(
+        self,
+        filename: str,
+        header: Optional[int] = None,
+    ) -> CSV:
+        data, indices, headers = [], [], []
+
+        fn = partial(os.path.join, self.root, self.base_folder)
+        with open(fn(filename)) as csv_file:
+            data = list(csv.reader(csv_file, delimiter=' ', skipinitialspace=True))
+
+        if header is not None:
+            headers = data[header]
+            data = data[header + 1:]
+
+        indices = [row[0] for row in data]
+        data = [row[1:] for row in data]
+        data_int = [list(map(int, i)) for i in data]
+
+        return CSV(headers, indices, torch.tensor(data_int))
+
+    def _check_integrity(self) -> bool:
+        for (_, md5, filename) in self.file_list:
+            fpath = os.path.join(self.root, self.base_folder, filename)
+            _, ext = os.path.splitext(filename)
+            # Allow original archive to be deleted (zip and 7z)
+            # Only need the extracted images
+            if ext not in [".zip", ".7z"] and not check_integrity(fpath, md5):
+                print(fpath)
+                return False
+        return True
+        # Should check a hash of the images
+        # return os.path.isdir(os.path.join(self.root, self.base_folder, "img_align_celeba"))
+
+    def _get_paths_ff(self, indices):
+        list_paths = []
+        for index in indices:
+            list_paths.append(os.path.join("img_align_celeba", self.filename[index]))
+        return list_paths
+    def __getitem__(self, indices):
+        list_bytes = self.reader_celeb.read(self._get_paths_ff(indices))
+        transformed_samples = []
+        for i in range(len(list_bytes)):
+            img = PIL.Image.open(io.BytesIO(list_bytes[i]))
+            # if self.random_crop:
+            #     arr = random_crop_arr(img, self.resolution)
+            # else:
+            #     arr = center_crop_arr(img, self.resolution)
+            #
+            # if self.random_flip and random.random() < 0.5:
+            #     arr = arr[:, ::-1]
+            #
+            # img = arr.astype(np.float32) / 127.5 - 1
+            # img = np.transpose(img, [2, 0, 1])  # might not need to transpose
+            if self.transform:
+                img = self.transform(img)
+            out_dict = {}
+            if self.classes:
+                target: Any = []
+                for t in self.target_type:
+                    if t == "attr":
+                        target.append(self.attr[indices[i], :])
+                    elif t == "identity":
+                        target.append(self.identity[indices[i], 0])
+                    elif t == "bbox":
+                        target.append(self.bbox[indices[i], :])
+                    elif t == "landmarks":
+                        target.append(self.landmarks_align[indices[i], :])
+                    else:
+                        # TODO: refactor with utils.verify_str_arg
+                        raise ValueError("Target type \"{}\" is not recognized.".format(t))
+
+                if target:
+                    target = tuple(target) if len(target) > 1 else target[0]
+
+                    # if self.target_transform is not None:
+                    #     target = self.target_transform(target)
+                    out_dict['y'] = target
+                else:
+                    target = None
+            transformed_samples.append((img, out_dict))
+        return transformed_samples
+
+    def __len__(self) -> int:
+        return len(self.attr)
+
+    def extra_repr(self) -> str:
+        lines = ["Target type: {target_type}", "Split: {split}"]
+        return '\n'.join(lines).format(**self.__dict__)
+
+
+class CelebA64HF(BaseDataset):
+    """`Large-scale CelebFaces Attributes (CelebA) Dataset <http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html>`_ Dataset.
+
+    Args:
+        root (string): Root directory where images are downloaded to.
+        split (string): One of {'train', 'valid', 'test', 'all'}.
+            Accordingly dataset is selected.
+        target_type (string or list, optional): Type of target to use, ``attr``, ``identity``, ``bbox``,
+            or ``landmarks``. Can also be a list to output a tuple with all specified target types.
+            The targets represent:
+
+                - ``attr`` (np.array shape=(40,) dtype=int): binary (0, 1) labels for attributes
+                - ``identity`` (int): label for each person (data points with the same identity are the same person)
+                - ``bbox`` (np.array shape=(4,) dtype=int): bounding box (x, y, width, height)
+                - ``landmarks`` (np.array shape=(10,) dtype=int): landmark points (lefteye_x, lefteye_y, righteye_x,
+                  righteye_y, nose_x, nose_y, leftmouth_x, leftmouth_y, rightmouth_x, rightmouth_y)
+
+            Defaults to ``attr``. If empty, ``None`` will be returned as target.
+
+        transform (callable, optional): A function/transform that  takes in an PIL image
+            and returns a transformed version. E.g, ``transforms.ToTensor``
+        target_transform (callable, optional): A function/transform that takes in the
+            target and transforms it.
+        download (bool, optional): If true, downloads the dataset from the internet and
+            puts it in root directory. If dataset is already downloaded, it is not
+            downloaded again.
+    """
+
+    base_folder = "celeba"
+    # There currently does not appear to be a easy way to extract 7z in python (without introducing additional
+    # dependencies). The "in-the-wild" (not aligned+cropped) images are only in 7z, so they are not available
+    # right now.
+    file_list = [
+        # File ID                                      MD5 Hash                            Filename
+        # ("0B7EVK8r0v71pZjFTYXZWM3FlRnM", "00d2c5bc6d35e252742224ab0c1e8fcb", "img_align_celeba.zip"),
+        # ("0B7EVK8r0v71pbWNEUjJKdDQ3dGc","b6cd7e93bc7a96c2dc33f819aa3ac651", "img_align_celeba_png.7z"),
+        # ("0B7EVK8r0v71peklHb0pGdDl6R28", "b6cd7e93bc7a96c2dc33f819aa3ac651", "img_celeba.7z"),
+        ("0B7EVK8r0v71pblRyaVFSWGxPY0U", "75e246fa4810816ffd6ee81facbd244c", "list_attr_celeba.txt"),
+        ("1_ee_0u7vcNLOfNLegJRHmolfH5ICW-XS", "32bd1bd63d3c78cd57e08160ec5ed1e2", "identity_CelebA.txt"),
+        ("0B7EVK8r0v71pbThiMVRxWXZ4dU0", "00566efa6fedff7a56946cd1c10f1c16", "list_bbox_celeba.txt"),
+        ("0B7EVK8r0v71pd0FJY3Blby1HUTQ", "cc24ecafdb5b50baae59b03474781f8c", "list_landmarks_align_celeba.txt"),
+        # ("0B7EVK8r0v71pTzJIdlJWdHczRlU", "063ee6ddb681f96bc9ca28c6febb9d1a", "list_landmarks_celeba.txt"),
+        ("0B7EVK8r0v71pY0NSMzRuSXJEVkk", "d32c9cbf5e040fd4025c592c306e6668", "list_eval_partition.txt"),
+    ]
+
+    def __init__(
+            self,
+            root: str,
+            resolution,
+            random_crop=False,
+            random_flip=True,
+            split: str = "train",
+            target_type: Union[List[str], str] = "attr",
+            classes=False
+    ) -> None:
+        super(CelebA64HF, self).__init__()
+        image_file = os.path.join(get_data_dir(), "/private_dataset/CelebA/celeba.ffr")
+        self.root = root
+        # read from celeba.ffr
+        self.reader_celeb = PackedFolder(image_file)
+        self.images_folder = "img_align_celeba"
+        #
+        self.resolution = resolution
+        self.random_crop = random_crop
+        self.random_flip = random_flip
+        self.transform=None
+        self.split = split
+        self.classes = classes
+        if isinstance(target_type, list):
+            self.target_type = target_type
+        else:
+            self.target_type = [target_type]
+
+        if not self.target_type and self.target_transform is not None:
+            raise RuntimeError('target_transform is specified but target_type is empty')
+
+        if not self._check_integrity():
+            raise RuntimeError('Dataset not found or corrupted.' +
+                               ' You can use download=True to download it')
+
+        split_map = {
+            "train": 0,
+            "valid": 1,
+            "test": 2,
+            "all": None,
+        }
+        split_ = split_map[verify_str_arg(split.lower(), "split",
+                                          ("train", "valid", "test", "all"))]
+        splits = self._load_csv("list_eval_partition.txt")
+        identity = self._load_csv("identity_CelebA.txt")
+        bbox = self._load_csv("list_bbox_celeba.txt", header=1)
+        landmarks_align = self._load_csv("list_landmarks_align_celeba.txt", header=1)
+        attr = self._load_csv("list_attr_celeba.txt", header=1)
+
+        mask = slice(None) if split_ is None else (splits.data == split_).squeeze()
+
+        self.filename = splits.index
+        self.identity = identity.data[mask]
+        self.bbox = bbox.data[mask]
+        self.landmarks_align = landmarks_align.data[mask]
+        self.attr = attr.data[mask]
+        # map from {-1, 1} to {0, 1}
+        self.attr = torch.div(self.attr + 1, 2, rounding_mode='floor')
+        self.attr_names = attr.header
+
+    def _load_csv(
+        self,
+        filename: str,
+        header: Optional[int] = None,
+    ) -> CSV:
+        data, indices, headers = [], [], []
+
+        fn = partial(os.path.join, self.root, self.base_folder)
+        with open(fn(filename)) as csv_file:
+            data = list(csv.reader(csv_file, delimiter=' ', skipinitialspace=True))
+
+        if header is not None:
+            headers = data[header]
+            data = data[header + 1:]
+
+        indices = [row[0] for row in data]
+        data = [row[1:] for row in data]
+        data_int = [list(map(int, i)) for i in data]
+
+        return CSV(headers, indices, torch.tensor(data_int))
+
+    def _check_integrity(self) -> bool:
+        for (_, md5, filename) in self.file_list:
+            fpath = os.path.join(self.root, self.base_folder, filename)
+            _, ext = os.path.splitext(filename)
+            # Allow original archive to be deleted (zip and 7z)
+            # Only need the extracted images
+            if ext not in [".zip", ".7z"] and not check_integrity(fpath, md5):
+                print(fpath)
+                return False
+        return True
+        # Should check a hash of the images
+        # return os.path.isdir(os.path.join(self.root, self.base_folder, "img_align_celeba"))
+
+    def _get_paths_ff(self, indices):
+        list_paths = []
+        for index in indices:
+            list_paths.append(os.path.join("img_align_celeba", self.filename[index]))
+        return list_paths
+    def __getitem__(self, indices):
+        list_bytes = self.reader_celeb.read(self._get_paths_ff(indices))
+        transformed_samples = []
+        for i in range(len(list_bytes)):
+            img = PIL.Image.open(io.BytesIO(list_bytes[i]))
+            if self.random_crop:
+                arr = random_crop_arr(img, self.resolution)
+            else:
+                arr = center_crop_arr(img, self.resolution)
+
+            if self.random_flip and random.random() < 0.5:
+                arr = arr[:, ::-1]
+
+            img = arr.astype(np.float32) / 127.5 - 1
+            img = np.transpose(img, [2, 0, 1])  # might not need to transpose
+            # if self.transform:
+            #     img = self.transform(img)
+            out_dict = {}
+            if self.classes:
+                target: Any = []
+                for t in self.target_type:
+                    if t == "attr":
+                        target.append(self.attr[indices[i], :])
+                    elif t == "identity":
+                        target.append(self.identity[indices[i], 0])
+                    elif t == "bbox":
+                        target.append(self.bbox[indices[i], :])
+                    elif t == "landmarks":
+                        target.append(self.landmarks_align[indices[i], :])
+                    else:
+                        # TODO: refactor with utils.verify_str_arg
+                        raise ValueError("Target type \"{}\" is not recognized.".format(t))
+
+                if target:
+                    target = tuple(target) if len(target) > 1 else target[0]
+
+                    # if self.target_transform is not None:
+                    #     target = self.target_transform(target)
+                    out_dict['y'] = target
+                else:
+                    target = None
+            transformed_samples.append((img, out_dict))
+        return transformed_samples
+
+    def __len__(self) -> int:
+        return len(self.attr)
+
+    def extra_repr(self) -> str:
+        lines = ["Target type: {target_type}", "Split: {split}"]
+        return '\n'.join(lines).format(**self.__dict__)
+
+
+class CelebALocal(BaseDataset):
     """`Large-scale CelebFaces Attributes (CelebA) Dataset <http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html>`_ Dataset.
 
     Args:
@@ -348,14 +756,27 @@ class CelebAHF(BaseDataset):
     def __init__(
             self,
             root: str,
+            resolution,
+            random_crop=False,
+            random_flip=True,
             split: str = "train",
             target_type: Union[List[str], str] = "attr",
-            transform: Optional[Callable] = None,
-            target_transform: Optional[Callable] = None,
-            download: bool = False,
+            classes=False
     ) -> None:
-        super(CelebAHF, self).__init__()
+        super(CelebALocal, self).__init__()
+        download = True
+        self.root = root
+        self.resolution = resolution
+        self.random_crop = random_crop
+        self.random_flip = random_flip
+        self.transform = transforms.Compose([
+            transforms.Resize(self.resolution),
+            transforms.CenterCrop(self.resolution),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5),
+                (0.5, 0.5, 0.5))])
         self.split = split
+        self.classes = classes
         if isinstance(target_type, list):
             self.target_type = target_type
         else:
@@ -442,35 +863,48 @@ class CelebAHF(BaseDataset):
         with zipfile.ZipFile(os.path.join(self.root, self.base_folder, "img_align_celeba.zip"), "r") as f:
             f.extractall(os.path.join(self.root, self.base_folder))
 
-    def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        X = PIL.Image.open(os.path.join(self.root, self.base_folder, "img_align_celeba", self.filename[index]))
+    def __getitem__(self, indices):
+        transformed_samples = []
+        for index in indices:
+            img = PIL.Image.open(os.path.join(self.root, self.base_folder, "img_align_celeba", self.filename[index]))
+            # if self.random_crop:
+            #     arr = random_crop_arr(img, self.resolution)
+            # else:
+            #     arr = center_crop_arr(img, self.resolution)
+            #
+            # if self.random_flip and random.random() < 0.5:
+            #     arr = arr[:, ::-1]
+            #
+            # img = arr.astype(np.float32) / 127.5 - 1
+            # img = np.transpose(img, [2, 0, 1])  # might not need to transpose
+            if self.transform:
+                img = self.transform(img)
+            out_dict = {}
+            if self.classes:
+                target: Any = []
+                for t in self.target_type:
+                    if t == "attr":
+                        target.append(self.attr[index, :])
+                    elif t == "identity":
+                        target.append(self.identity[index, 0])
+                    elif t == "bbox":
+                        target.append(self.bbox[index, :])
+                    elif t == "landmarks":
+                        target.append(self.landmarks_align[index, :])
+                    else:
+                        # TODO: refactor with utils.verify_str_arg
+                        raise ValueError("Target type \"{}\" is not recognized.".format(t))
 
-        target: Any = []
-        for t in self.target_type:
-            if t == "attr":
-                target.append(self.attr[index, :])
-            elif t == "identity":
-                target.append(self.identity[index, 0])
-            elif t == "bbox":
-                target.append(self.bbox[index, :])
-            elif t == "landmarks":
-                target.append(self.landmarks_align[index, :])
-            else:
-                # TODO: refactor with utils.verify_str_arg
-                raise ValueError("Target type \"{}\" is not recognized.".format(t))
+                if target:
+                    target = tuple(target) if len(target) > 1 else target[0]
 
-        if self.transform is not None:
-            X = self.transform(X)
-
-        if target:
-            target = tuple(target) if len(target) > 1 else target[0]
-
-            if self.target_transform is not None:
-                target = self.target_transform(target)
-        else:
-            target = None
-
-        return X, target
+                    # if self.target_transform is not None:
+                    #     target = self.target_transform(target)
+                    out_dict['y'] = target
+                else:
+                    target = None
+            transformed_samples.append((img, out_dict))
+        return transformed_samples
 
     def __len__(self) -> int:
         return len(self.attr)

@@ -19,45 +19,48 @@ from torch.optim import AdamW
 
 from guided_diffusion_hfai import dist_util, logger
 from guided_diffusion_hfai.fp16_util import MixedPrecisionTrainer
-from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_MNIST, load_dataset_MNIST_nosampler
+from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_MNIST, load_dataset_CelebA
 from guided_diffusion_hfai.resample import create_named_schedule_sampler
 from guided_diffusion_hfai.script_util import (
     add_dict_to_argparser,
     args_to_dict,
     classifier_and_diffusion_defaults,
-    create_classifier_and_diffusion,
     create_classifierinfoq_and_diffusion_infodiff
 )
-from guided_diffusion_hfai.losses import kdloss, kdloss_gb
-from guided_diffusion_hfai.train_util import parse_resume_step_from_filename, log_loss_dict
+from guided_diffusion_hfai.losses import kdloss, kdloss_gb, NormalNLLLoss
+from guided_diffusion_hfai.train_util import parse_resume_step_from_filename, log_loss_dict, model_entropy
+import hfai.client
 
 
-def main():
+def main(local_rank):
     args = create_argparser().parse_args()
     save_model_folder = os.path.join(args.logdir, "models")
     os.makedirs(save_model_folder, exist_ok=True)
+    dist_util.setup_dist(local_rank)
 
     alpha_e = args.alphae
-    log_folder = os.path.join(
-        args.logdir,
-        "logs"
-    )
-
-    logger.configure(log_folder, rank=0)
-
-    logger.log("creating model and diffusion...")
-
     num_cat = args.cat_num
     cat_dim = args.cat_dim
     num_con = args.con_num
     output_channels = num_con * 2 + cat_dim * num_cat
 
-    model, model_clean, diffusion = create_classifierinfoq_and_diffusion_infodiff(output_channels=output_channels,
-                                                                                  **args_to_dict(args,
-                                                                                                 classifier_and_diffusion_defaults().keys())
-                                                                                  )
+
+    log_folder = os.path.join(
+        args.logdir,
+        "logs"
+    )
+    if dist.get_rank() == 0:
+        logger.configure(log_folder, rank=dist.get_rank())
+    else:
+        logger.configure(rank=dist.get_rank())
+    logger.log("creating model and diffusion...")
+
+    model, model_clean ,diffusion = create_classifierinfoq_and_diffusion_infodiff(output_channels=output_channels,
+                                                                                  info_gan_dataset="celeba",
+        **args_to_dict(args, classifier_and_diffusion_defaults().keys() )
+    )
+    model_clean.to(dist_util.dev())
     model.to(dist_util.dev())
-    # model_clean = model_clean.to(dist_util.dev())
     if args.noised:
         schedule_sampler = create_named_schedule_sampler(
             args.schedule_sampler, diffusion
@@ -95,22 +98,31 @@ def main():
             model.load_state_dict(dist_util.load_state_dict(latest_model))
 
     # Needed for creating correct EMAs and fp16 parameters.
-    # dist_util.sync_params(model.parameters())
+    dist_util.sync_params(model.parameters())
+    dist_util.sync_params(model_clean.parameters())
 
     mp_trainer = MixedPrecisionTrainer(
         model=model, use_fp16=args.classifier_use_fp16, initial_lg_loss_scale=16.0
     )
-    model = model.to(dist_util.dev())
-    model_clean = model_clean.to(dist_util.dev())
+
+    model = DDP(
+        model,
+        device_ids=[dist_util.dev()],
+        # output_device=dist_util.dev(),
+        broadcast_buffers=False,
+        # bucket_cap_mb=128,
+        find_unused_parameters=False,
+    )
+
+    model_clean = DDP(
+        model_clean,
+        device_ids=[dist_util.dev()],
+        # output_device=dist_util.dev(),
+        broadcast_buffers=False,
+        # bucket_cap_mb=128,
+        find_unused_parameters=False,
+    )
     model_clean.eval()
-    # model = DDP(
-    #     model,
-    #     device_ids=[dist_util.dev()],
-    #     # output_device=dist_util.dev(),
-    #     broadcast_buffers=False,
-    #     # bucket_cap_mb=128,
-    #     find_unused_parameters=False,
-    # )
 
     logger.log("creating data loader...")
     # data = load_data(
@@ -120,9 +132,11 @@ def main():
     #     class_cond=True,
     #     random_crop=True,
     # )
-    data = load_dataset_MNIST_nosampler(
-        train=True, batch_size=args.batch_size, class_cond=True
+    data = load_dataset_CelebA(
+        train=True, image_size=args.image_size,
+        batch_size=args.batch_size, random_crop=True, class_cond=False
     )
+
     if args.val_data_dir:
         # val_data = load_data(
         #     data_dir=args.val_data_dir,
@@ -130,8 +144,8 @@ def main():
         #     image_size=args.image_size,
         #     class_cond=True,
         # )
-        val_data = load_dataset_MNIST_nosampler(
-            train=True, batch_size=args.batch_size, class_cond=True)
+        val_data = load_dataset_MNIST(
+            train=True, batch_size=args.batch_size, class_cond=False)
     else:
         val_data = None
 
@@ -156,13 +170,13 @@ def main():
                 logger.log(f"Training from {step}")
                 resume_step = step
 
-
+    # define loss
 
     logger.log("training variational prediction classifier model...")
 
     def forward_backward_log(data_loader, prefix="train"):
         batch, extra = next(data_loader)
-        labels = extra["y"].to(dist_util.dev())
+        # labels = extra["y"].to(dist_util.dev())
 
         batch = batch.to(dist_util.dev())
         # Noisy images
@@ -172,27 +186,33 @@ def main():
 
         t_clean = th.zeros(batch.shape[0], dtype=th.long, device=dist_util.dev())
 
-        for i, (sub_batch, sub_batch_noises, sub_gt_labels, sub_t) in enumerate(
-            split_microbatches(args.microbatch, batch, batch_noise, labels, t)
+        for i, (sub_batch, sub_batch_noises, sub_t) in enumerate(
+            split_microbatches(args.microbatch, batch, batch_noise, t)
         ):
 
             clean_disc, q_mu, q_var = model_clean(sub_batch)
 
             noise_logits = model(sub_batch_noises, timesteps=sub_t)
+            clean_disc_detach = clean_disc.detach()
+            loss_kd = 0.0
+            for cat_index in range(num_cat-1):
+                loss_kd += kdloss(noise_logits[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))],
+                                 clean_disc_detach[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))])
 
-            loss_kd = kdloss(noise_logits[:, :(cat_dim * num_cat)], clean_disc.detach())
             # mse loss
+            if num_con != 0:
+                q_mu_var = torch.cat((q_mu, q_var), dim=1).to(dist_util.dev()).detach()
 
-            q_mu_var = torch.cat((q_mu, q_var), dim=1).to(dist_util.dev()).detach()
+                mu_noise = noise_logits[:, (cat_dim * num_cat): ((cat_dim * num_cat) + num_con)]
+                var_noise = torch.exp(noise_logits[:, ((cat_dim * num_cat) + num_con):])
 
-            mu_noise = noise_logits[:, (cat_dim * num_cat): ((cat_dim * num_cat) + num_con)]
-            var_noise = torch.exp(noise_logits[:, ((cat_dim * num_cat) + num_con):])
+                logits_mu_var = torch.cat((mu_noise, var_noise), dim=1).to(dist_util.dev())
 
-            logits_mu_var = torch.cat((mu_noise, var_noise), dim=1).to(dist_util.dev())
-
-            loss_mse = torch.mean(F.mse_loss(logits_mu_var,
-                                             q_mu_var,
-                                             reduction='none'), dim=1)
+                loss_mse = torch.mean(F.mse_loss(logits_mu_var,
+                                                 q_mu_var,
+                                                 reduction='none'), dim=1)
+            else:
+                loss_mse = torch.zeros((noise_logits.shape[0],)).to(dist_util.dev())
 
 
             loss = loss_kd  + loss_mse
@@ -210,7 +230,6 @@ def main():
                 if i == 0:
                     mp_trainer.zero_grad()
                 mp_trainer.backward(loss * len(sub_batch) / len(batch))
-
     data_iter = iter(data)
     if val_data is not None:
         val_iter = iter(val_data)
@@ -219,7 +238,7 @@ def main():
         logger.logkv("step", step + resume_step)
         logger.logkv(
             "samples",
-            (step + resume_step + 1) * args.batch_size ,
+            (step + resume_step + 1) * args.batch_size * dist.get_world_size(),
         )
         if args.anneal_lr:
             set_annealed_lr(opt, args.lr, (step + resume_step) / args.iterations)
@@ -235,18 +254,25 @@ def main():
             logger.dumpkvs()
         if (
             step
+            and dist.get_rank() == 0
             and not (step + resume_step) % args.save_interval
         ):
             logger.log("saving model...")
             save_model(mp_trainer, opt, step + resume_step, save_model_folder)
-        if step % 1000 == 0 and step != 0:
+        if step % 1000 == 0 and dist.get_rank() == 0 and step != 0:
             logger.log("Saving latest model")
             save_model_latest(mp_trainer, opt, step+resume_step, save_model_folder)
+        elif dist.get_rank() == 0 and hfai.client.receive_suspend_command():
+            logger.log("Saving latest model")
+            save_model_latest(mp_trainer, opt, step + resume_step, save_model_folder)
+            logger.log(f"step {step + resume_step}, client has suspended. Good luck next run ^^")
+            hfai.client.go_suspend()
 
 
-    logger.log("saving model...")
-    save_model(mp_trainer, opt, step + resume_step, save_model_folder)
-    # dist.barrier()
+    if dist.get_rank() == 0:
+        logger.log("saving model...")
+        save_model(mp_trainer, opt, step + resume_step, save_model_folder)
+    dist.barrier()
 
 
 def set_annealed_lr(opt, base_lr, frac_done):
@@ -256,20 +282,21 @@ def set_annealed_lr(opt, base_lr, frac_done):
 
 
 def save_model(mp_trainer, opt, step, model_folder="runs", latest=False):
-
-    th.save(
-        mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
-        os.path.join(model_folder, f"model{step:06d}.pt"),
-    )
-    th.save(opt.state_dict(), os.path.join(model_folder, f"opt{step:06d}.pt"))
+    if dist.get_rank() == 0:
+        th.save(
+            mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
+            os.path.join(model_folder, f"model{step:06d}.pt"),
+        )
+        th.save(opt.state_dict(), os.path.join(model_folder, f"opt{step:06d}.pt"))
 
 def save_model_latest(mp_trainer, opt, step, model_folder="runs"):
-    th.save(
-        mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
-        os.path.join(model_folder, "latest.pt"),
-    )
-    th.save({'opt': opt.state_dict(),
-             'step': step}, os.path.join(model_folder, "optlatest.pt"))
+    if dist.get_rank() == 0:
+        th.save(
+            mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
+            os.path.join(model_folder, "latest.pt"),
+        )
+        th.save({'opt': opt.state_dict(),
+                 'step': step}, os.path.join(model_folder, "optlatest.pt"))
 
 
 def compute_top_k(logits, labels, k, reduction="mean"):
@@ -310,25 +337,21 @@ def create_argparser():
         microbatch=-1,
         schedule_sampler="uniform",
         resume_checkpoint="",
-        log_interval=10,
+        log_interval=100,
         eval_interval=5,
-        save_interval=10000,
+        save_interval=25000,
         logdir="runs",
-        alphae=0.2,
-        cat_num=1,
+        alphae=0.1,
+        cat_num=10,
         cat_dim=10,
-        con_num=2
+        con_num=0
     )
     defaults.update(classifier_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
     return parser
 
-def model_entropy(x_pred):
-    # compute entropy loss
-    x_pred = torch.mean(x_pred, dim=0)
-    loss = x_pred * torch.log(x_pred + 1e-20)
-    return torch.sum(loss)
 
 if __name__ == "__main__":
-    main()
+    ngpus = th.cuda.device_count()
+    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)

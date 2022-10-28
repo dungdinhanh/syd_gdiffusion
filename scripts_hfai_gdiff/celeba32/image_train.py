@@ -6,7 +6,7 @@ import argparse
 import os
 
 from guided_diffusion_hfai import dist_util, logger
-from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai
+from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_CelebA, load_dataset_MNIST
 from guided_diffusion_hfai.resample import create_named_schedule_sampler
 from guided_diffusion_hfai.script_util import (
     model_and_diffusion_defaults,
@@ -18,8 +18,6 @@ from guided_diffusion_hfai.train_util_hfai import TrainLoop
 import hfai
 import torch as th
 import hfai.nccl.distributed as dist
-
-import hfai.checkpoint
 
 
 def main(local_rank):
@@ -43,7 +41,7 @@ def main(local_rank):
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log("creating data loader...")
-    data = load_data_imagenet_hfai(
+    data = load_dataset_CelebA(
         train=True, image_size=args.image_size,
         batch_size=args.batch_size, random_crop=True, class_cond=args.class_cond
     )
@@ -79,8 +77,8 @@ def create_argparser():
         batch_size=1,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
-        log_interval=10,
-        save_interval=10000,
+        log_interval=100,
+        save_interval=50000,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,

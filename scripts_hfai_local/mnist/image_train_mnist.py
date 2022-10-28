@@ -6,7 +6,7 @@ import argparse
 import os
 
 from guided_diffusion_hfai import dist_util, logger
-from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai
+from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_MNIST_nosampler
 from guided_diffusion_hfai.resample import create_named_schedule_sampler
 from guided_diffusion_hfai.script_util import (
     model_and_diffusion_defaults,
@@ -14,26 +14,21 @@ from guided_diffusion_hfai.script_util import (
     args_to_dict,
     add_dict_to_argparser,
 )
-from guided_diffusion_hfai.train_util_hfai import TrainLoop
+from guided_diffusion_hfai.train_util_local import TrainLoop
 import hfai
 import torch as th
 import hfai.nccl.distributed as dist
 
-import hfai.checkpoint
 
-
-def main(local_rank):
+def main():
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist(local_rank)
     log_folder = os.path.join(
         args.logdir,
         "logs"
     )
-    if dist.get_rank() == 0:
-        logger.configure(log_folder, rank=dist.get_rank())
-    else:
-        logger.configure(rank=dist.get_rank())
+
+    logger.configure(log_folder, rank = 0)
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -43,10 +38,7 @@ def main(local_rank):
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log("creating data loader...")
-    data = load_data_imagenet_hfai(
-        train=True, image_size=args.image_size,
-        batch_size=args.batch_size, random_crop=True, class_cond=args.class_cond
-    )
+    data = load_dataset_MNIST_nosampler(train=True, batch_size=args.batch_size, class_cond=args.class_cond)
 
     logger.log("training...")
     TrainLoop(
@@ -79,8 +71,8 @@ def create_argparser():
         batch_size=1,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
-        log_interval=10,
-        save_interval=10000,
+        log_interval=200,
+        save_interval=20000,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
@@ -93,5 +85,4 @@ def create_argparser():
 
 
 if __name__ == "__main__":
-    ngpus = th.cuda.device_count()
-    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)
+    main()

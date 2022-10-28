@@ -18,33 +18,31 @@ from guided_diffusion_hfai.script_util import (
     model_and_diffusion_defaults,
     classifier_defaults,
     create_model_and_diffusion,
+    create_classifier,
     create_classifier_infodiff,
     add_dict_to_argparser,
     args_to_dict,
 )
-from guided_diffusion_hfai.losses import NormalNLLLoss
 import datetime
 from PIL import Image
 
 
-def main():
+def main(local_rank):
     args = create_argparser().parse_args()
+    num_cat = args.cat_num
+    cat_dim = args.cat_dim
+    num_con = args.con_num
+    total_cat_dim = num_cat * cat_dim
+    output_channels = num_con * 2 + cat_dim * num_cat
 
-    # dist_util.setup_dist()
+    dist_util.setup_dist(local_rank)
 
     save_folder = os.path.join(
         args.logdir,
         "logs",
     )
 
-    logger.configure(save_folder, rank=0)
-
-    num_cat = args.cat_num
-    cat_dim = args.cat_dim
-    num_con = args.con_num
-    total_cat_dim = num_cat * cat_dim
-    output_channels = num_con * 2 + cat_dim * num_cat
-    nll_loss = NormalNLLLoss()
+    logger.configure(save_folder, rank=dist.get_rank())
 
     output_images_folder = os.path.join(args.logdir, "reference")
     os.makedirs(output_images_folder, exist_ok=True)
@@ -63,7 +61,8 @@ def main():
 
 
     logger.log("loading classifier...")
-    classifier = create_classifier_infodiff(out_channels=output_channels, **args_to_dict(args, classifier_defaults().keys()))
+    classifier = create_classifier_infodiff(out_channels=output_channels,
+                                            **args_to_dict(args, classifier_defaults().keys()))
     classifier.load_state_dict(
         dist_util.load_state_dict(args.classifier_path, map_location="cpu")
     )
@@ -74,22 +73,28 @@ def main():
 
     def cond_fn(x, t, y=None, con=None):
         assert y is not None
-        assert con is not None
+        # assert con is not None
         with th.enable_grad():
             x_in = x.detach().requires_grad_(True)
             logits = classifier(x_in, t)
-            log_probs = F.log_softmax(logits[:, : total_cat_dim], dim=-1)
-            selected = log_probs[range(len(logits)), y.view(-1)]
-            q_mu = logits[:, total_cat_dim: (total_cat_dim + num_con)]
-            q_var = th.exp(logits[:, (total_cat_dim + num_con):])
-            # con_selected = nll_loss(con, q_mu, q_var)
-            con_selected = 0.0
+            # log_probs = 0.0
+            selected = 0.0
+            for cat_index in range(num_cat):
+                log_probs = F.log_softmax(logits[:, cat_dim * cat_index : cat_dim * (cat_index + 1)], dim=-1)
+                selected += log_probs[range(len(log_probs)), y[:, cat_index].view(-1)]
+            if num_con != 0:
+                q_mu = logits[:, total_cat_dim: (total_cat_dim + num_con)]
+                q_var = th.exp(logits[:, (total_cat_dim + num_con):])
+                # con_selected = nll_loss(con, q_mu, q_var)
+                con_selected = 0.0
+            else:
+                con_selected = 0.0
             selected = selected + con_selected
             return th.autograd.grad(selected.sum(), x_in)[0] * args.classifier_scale
 
     def model_fn(x, t, y=None, con=None):
         assert y is not None
-        assert con is not None
+        # assert con is not None
         return model(x, t, y if args.class_cond else None)
 
     logger.log("Looking for previous file")
@@ -111,11 +116,9 @@ def main():
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = {}
         classes = th.randint(
-            low=0, high=num_class, size=(args.batch_size,), device=dist_util.dev()
+            low=0, high=cat_dim, size=(args.batch_size, num_cat), device=dist_util.dev()
         )
-        con_condition = - 4 * th.rand((args.batch_size, num_con), device=dist_util.dev()) + 2
         model_kwargs["y"] = classes
-        model_kwargs["con"] = con_condition
         sample_fn = (
             diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
         )
@@ -131,15 +134,17 @@ def main():
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
 
-        gathered_samples = [sample]
-        # dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
+        gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
+        dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
         batch_images = [sample.cpu().numpy() for sample in gathered_samples]
         all_images.extend(batch_images)
-        gathered_labels = [classes]
+        gathered_labels = [th.zeros_like(classes) for _ in range(dist.get_world_size())]
+        dist.all_gather(gathered_labels, classes)
         batch_labels = [labels.cpu().numpy() for labels in gathered_labels]
         all_labels.extend(batch_labels)
-        logger.log(f"created {len(all_images) * args.batch_size} samples")
-        np.savez(checkpoint, np.stack(all_images), np.stack(all_labels))
+        if dist.get_rank() == 0:
+            logger.log(f"created {len(all_images) * args.batch_size} samples")
+            np.savez(checkpoint, np.stack(all_images), np.stack(all_labels))
 
         #     for i in range(len(batch_images)):
         #         # print(batch_images[0].shape)
@@ -154,13 +159,14 @@ def main():
     arr = arr[: args.num_samples]
     label_arr = np.concatenate(all_labels, axis=0)
     label_arr = label_arr[: args.num_samples]
+    if dist.get_rank() == 0:
+        shape_str = "x".join([str(x) for x in arr.shape])
+        out_path = os.path.join(output_images_folder, f"samples_{shape_str}.npz")
+        logger.log(f"saving to {out_path}")
+        np.savez(out_path, arr, label_arr)
+        os.remove(checkpoint)
 
-    shape_str = "x".join([str(x) for x in arr.shape])
-    out_path = os.path.join(output_images_folder, f"samples_{shape_str}.npz")
-    logger.log(f"saving to {out_path}")
-    np.savez(out_path, arr, label_arr)
-    os.remove(checkpoint)
-
+    dist.barrier()
     logger.log("sampling complete")
 
 
@@ -174,9 +180,9 @@ def create_argparser():
         classifier_path="",
         classifier_scale=1.0,
         logdir="",
-        cat_num=1,
+        cat_num=10,
         cat_dim=10,
-        con_num=2
+        con_num=0
     )
     defaults.update(model_and_diffusion_defaults())
     defaults.update(classifier_defaults())
@@ -187,6 +193,5 @@ def create_argparser():
 
 
 if __name__ == "__main__":
-    # ngpus = th.cuda.device_count()
-    # hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)
-    main()
+    ngpus = th.cuda.device_count()
+    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)

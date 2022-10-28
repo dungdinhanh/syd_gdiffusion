@@ -8,6 +8,7 @@ CLASSIFIER_FLAGS="--image_size 28 --classifier_attention_resolutions 14,7 --clas
 #cmd="cd ../.."
 #echo ${cmd}
 #eval ${cmd}
+cd_cmd="CUDA_VISIBLE_DEVICES=1"
 
 cmd="ls"
 echo ${cmd}

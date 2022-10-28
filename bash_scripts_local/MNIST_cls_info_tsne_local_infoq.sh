@@ -25,7 +25,7 @@ MODEL_FLAGS="--image_size 28 --num_channels 32 --num_res_blocks 1 --attention_re
 #TRAIN_FLAGS="--lr 1e-4 --batch_size 16 --lr_anneal_steps 200000  --dropout 0.1 --num_head_channels 8"
 SAMPLE_FLAGS="--batch_size 1048 --num_samples 1000 --timestep_respacing 250"
 
-cpath="../outputhfai/local_analyse/mnist_info/info_schm7/models/model149999.pt"
+cpath="../outputhfai/local_analyse/twostages_transfer/mnist_info_schm12/models/model149999.pt"
 mpath="../outputhfai/runs/mnist_diffusion_training_1node/models/model200000.pt"
 opath="../outputhfai/local_runs_info"
 namee="mnist_infosc4_sampling_1node"

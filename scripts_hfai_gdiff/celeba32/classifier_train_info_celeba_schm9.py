@@ -19,17 +19,17 @@ from torch.optim import AdamW
 
 from guided_diffusion_hfai import dist_util, logger
 from guided_diffusion_hfai.fp16_util import MixedPrecisionTrainer
-from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_MNIST
+from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_MNIST, load_dataset_CelebA
 from guided_diffusion_hfai.resample import create_named_schedule_sampler
 from guided_diffusion_hfai.script_util import (
     add_dict_to_argparser,
     args_to_dict,
     classifier_and_diffusion_defaults,
-    create_classifier_and_diffusion_infodiff,
+    create_classifierinfoq_and_diffusion_infodiff
 )
 from guided_diffusion_hfai.losses import kdloss, kdloss_gb, NormalNLLLoss
 from guided_diffusion_hfai.train_util import parse_resume_step_from_filename, log_loss_dict, model_entropy
-
+import hfai.client
 
 def main(local_rank):
     args = create_argparser().parse_args()
@@ -54,9 +54,11 @@ def main(local_rank):
         logger.configure(rank=dist.get_rank())
     logger.log("creating model and diffusion...")
 
-    model, diffusion = create_classifier_and_diffusion_infodiff(output_channels=output_channels,
+    model, model_clean ,diffusion = create_classifierinfoq_and_diffusion_infodiff(output_channels=output_channels,
+                                                                                  info_gan_dataset="celeba",
         **args_to_dict(args, classifier_and_diffusion_defaults().keys() )
     )
+    model_clean.to(dist_util.dev())
     model.to(dist_util.dev())
     if args.noised:
         schedule_sampler = create_named_schedule_sampler(
@@ -96,6 +98,7 @@ def main(local_rank):
 
     # Needed for creating correct EMAs and fp16 parameters.
     dist_util.sync_params(model.parameters())
+    dist_util.sync_params(model_clean.parameters())
 
     mp_trainer = MixedPrecisionTrainer(
         model=model, use_fp16=args.classifier_use_fp16, initial_lg_loss_scale=16.0
@@ -110,6 +113,16 @@ def main(local_rank):
         find_unused_parameters=False,
     )
 
+    model_clean = DDP(
+        model_clean,
+        device_ids=[dist_util.dev()],
+        # output_device=dist_util.dev(),
+        broadcast_buffers=False,
+        # bucket_cap_mb=128,
+        find_unused_parameters=False,
+    )
+    model_clean.eval()
+
     logger.log("creating data loader...")
     # data = load_data(
     #     data_dir=args.data_dir,
@@ -118,9 +131,11 @@ def main(local_rank):
     #     class_cond=True,
     #     random_crop=True,
     # )
-    data = load_dataset_MNIST(
-        train=True, batch_size=args.batch_size, class_cond=True
+    data = load_dataset_CelebA(
+        train=True, image_size=args.image_size,
+        batch_size=args.batch_size, random_crop=True, class_cond=False
     )
+
     if args.val_data_dir:
         # val_data = load_data(
         #     data_dir=args.val_data_dir,
@@ -128,8 +143,10 @@ def main(local_rank):
         #     image_size=args.image_size,
         #     class_cond=True,
         # )
-        val_data = load_dataset_MNIST(
-            train=True, batch_size=args.batch_size, class_cond=True)
+        load_dataset_CelebA(
+            train=True, image_size=args.image_size,
+            batch_size=args.batch_size, random_crop=True, class_cond=False
+        )
     else:
         val_data = None
 
@@ -155,13 +172,12 @@ def main(local_rank):
                 resume_step = step
 
     # define loss
-    nll_loss = NormalNLLLoss()
 
     logger.log("training variational prediction classifier model...")
 
     def forward_backward_log(data_loader, prefix="train"):
         batch, extra = next(data_loader)
-        labels = extra["y"].to(dist_util.dev())
+        # labels = extra["y"].to(dist_util.dev())
 
         batch = batch.to(dist_util.dev())
         # Noisy images
@@ -171,35 +187,65 @@ def main(local_rank):
 
         t_clean = th.zeros(batch.shape[0], dtype=th.long, device=dist_util.dev())
 
-        for i, (sub_batch, sub_batch_noises, sub_gt_labels, sub_t) in enumerate(
-            split_microbatches(args.microbatch, batch, batch_noise, labels, t)
+        for i, (sub_batch, sub_batch_noises, sub_t) in enumerate(
+            split_microbatches(args.microbatch, batch, batch_noise, t)
         ):
-
-            clean_logits = model(sub_batch, timesteps=t_clean)
-
+            # note that this is scheme 9 (not 11) change name later
+            clean_disc, q_mu, q_var = model_clean(sub_batch)
+            # transfer______________________________________________________________________
             noise_logits = model(sub_batch_noises, timesteps=sub_t)
+            clean_logits = model(sub_batch, timesteps=t_clean)
+            clean_disc_detach = clean_disc.detach()
+            loss_kd = 0.0
+            for cat_index in range(num_cat-1):
+                loss_kd += kdloss(clean_logits[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))],
+                                 clean_disc_detach[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))])
 
-            loss_ce = F.cross_entropy(noise_logits[:, :(cat_dim * num_cat)], th.argmax(clean_logits[:, :(cat_dim * num_cat)].detach(), 1).to(dist_util.dev()),
-                                      reduction="none")
             # mse loss
-            loss_mse = torch.mean(F.mse_loss(noise_logits[:, (cat_dim * num_cat):],
-                                             clean_logits[:, (cat_dim * num_cat):].detach(),
-                                             reduction='none'), dim=1)
+            if num_con != 0:
+                q_mu_var = torch.cat((q_mu, q_var), dim=1).to(dist_util.dev()).detach()
 
-            # entropy loss
-            discrete_softmax = F.softmax(clean_logits[:, :(cat_dim * num_cat)])
-            continuous_norm = F.sigmoid(clean_logits[:, (cat_dim * num_cat):])
-            norm_clean_logits = torch.cat((discrete_softmax, continuous_norm), dim=1)
-            loss_entropy = model_entropy(norm_clean_logits)
+                mu_clean = clean_logits[:, (cat_dim * num_cat): ((cat_dim * num_cat) + num_con)]
+                var_clean = torch.exp(clean_logits[:, ((cat_dim * num_cat) + num_con):])
 
-            loss = loss_ce + alpha_e * loss_entropy + loss_mse
+                logits_mu_var_clean = torch.cat((mu_clean, var_clean), dim=1).to(dist_util.dev())
+
+                loss_mse = torch.mean(F.mse_loss(logits_mu_var_clean,
+                                                 q_mu_var,
+                                                 reduction='none'), dim=1)
+            else:
+                loss_mse = torch.zeros((noise_logits.shape[0],)).to(dist_util.dev())
+
+            # guidance _________________________________________________________________________
+
+            clean_logits_detach = clean_logits.detach()
+            loss_ce_guidance = 0.0
+            for cat_index in range(num_cat-1):
+                loss_ce_guidance += kdloss(noise_logits[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))],
+                                 clean_logits_detach[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))])
+
+            if num_con != 0:
+                mu_noise = noise_logits[:, (cat_dim * num_cat): ((cat_dim * num_cat) + num_con)]
+                var_noise = torch.exp(noise_logits[:, ((cat_dim * num_cat) + num_con):])
+
+                logits_mu_var = torch.cat((mu_noise, var_noise), dim=1).to(dist_util.dev())
+
+                loss_con_guidance = torch.mean(F.mse_loss(logits_mu_var,
+                                                logits_mu_var_clean.detach(),
+                                                 reduction='none'), dim=1)
+            else:
+                loss_con_guidance = torch.zeros((noise_logits.shape[0],)).to(dist_util.dev())
+
+            loss = loss_kd + loss_mse + loss_ce_guidance + loss_con_guidance
 
             losses = dict()
 
             losses[f"{prefix}_loss"] = loss.detach()
-            losses[f"{prefix}_loss_ce"] = loss_ce.detach()
-            losses[f"{prefix}_loss_entropy"] = loss_entropy.detach().repeat(loss_ce.shape)
+            losses[f"{prefix}_loss_kd"] = loss_kd.detach()
             losses[f"{prefix}_loss_mse"] = loss_mse.detach()
+            losses[f"{prefix}_loss_ce_guidance"] = loss_ce_guidance.detach()
+            losses[f"{prefix}_loss_con_guidance"] = loss_con_guidance.detach()
+
 
             log_loss_dict(diffusion, sub_t, losses)
             del losses
@@ -240,6 +286,11 @@ def main(local_rank):
         if step % 1000 == 0 and dist.get_rank() == 0 and step != 0:
             logger.log("Saving latest model")
             save_model_latest(mp_trainer, opt, step+resume_step, save_model_folder)
+        elif dist.get_rank() == 0 and hfai.client.receive_suspend_command():
+            logger.log("Saving latest model")
+            save_model_latest(mp_trainer, opt, step + resume_step, save_model_folder)
+            logger.log(f"step {step + resume_step}, client has suspended. Good luck next run ^^")
+            hfai.client.go_suspend()
 
     if dist.get_rank() == 0:
         logger.log("saving model...")
@@ -309,14 +360,14 @@ def create_argparser():
         microbatch=-1,
         schedule_sampler="uniform",
         resume_checkpoint="",
-        log_interval=10,
+        log_interval=100,
         eval_interval=5,
-        save_interval=10000,
+        save_interval=25000,
         logdir="runs",
         alphae=0.1,
-        cat_num=1,
+        cat_num=10,
         cat_dim=10,
-        con_num=2
+        con_num=0
     )
     defaults.update(classifier_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

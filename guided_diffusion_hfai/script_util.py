@@ -161,7 +161,7 @@ def create_model(
         elif image_size == 28:
             channel_mult = (1, 2, 2)
             in_channels = 1
-            out_channels = 1
+            out_channels = (1 if not learn_sigma else 2)
         else:
             raise ValueError(f"unsupported image size: {image_size}")
     else:
@@ -273,7 +273,9 @@ def create_classifier_and_diffusion_infodiff(
     )
     return classifier, diffusion
 
-from guided_diffusion_hfai.infogan.mnist_model import *
+from guided_diffusion_hfai.infogan import mnist_model, celeba_model
+import torch.nn as nn
+import torch
 
 def weights_init(m):
     """
@@ -285,17 +287,25 @@ def weights_init(m):
         nn.init.normal_(m.weight.data, 1.0, 0.02)
         nn.init.constant_(m.bias.data, 0)
 
-def create_infoq(pretrained=True):
-    netD = Discriminator()
+def create_infoq(pretrained=True, dataset='mnist'):
+    if dataset == 'mnist':
+        info_model = mnist_model
+        pretrained_path = "models/model_epoch_100_MNIST.pt"
+    elif dataset == 'celeba':
+        info_model = celeba_model
+        pretrained_path = "models/model_epoch_100_CelebA.pt"
+    else:
+        print("no dataset found")
+        exit(0)
+    netD = info_model.Discriminator()
     netD.apply(weights_init)
-    netQ = QHead()
+    netQ = info_model.QHead()
     netQ.apply(weights_init)
     if pretrained:
-        pretrained_path = "models/model_epoch_100_MNIST.pt"
         checkpoint = torch.load(pretrained_path, map_location='cpu')
         netD.load_state_dict(checkpoint['discriminator'])
         netQ.load_state_dict(checkpoint['netQ'])
-    netDQ = DQNet(netD, netQ)
+    netDQ = info_model.DQNet(netD, netQ)
     return netDQ
 
 def create_classifierinfoq_and_diffusion_infodiff(
@@ -315,7 +325,8 @@ def create_classifierinfoq_and_diffusion_infodiff(
     predict_xstart,
     rescale_timesteps,
     rescale_learned_sigmas,
-        output_channels=14
+        output_channels=14,
+        info_gan_dataset='mnist'
 ):
     classifier_noise = create_classifier_infodiff(
         image_size,
@@ -328,7 +339,7 @@ def create_classifierinfoq_and_diffusion_infodiff(
         classifier_pool, out_channels=output_channels
     )
 
-    classifier_clean = create_infoq(True)
+    classifier_clean = create_infoq(True, info_gan_dataset)
 
 
     diffusion = create_gaussian_diffusion(

@@ -19,45 +19,45 @@ from torch.optim import AdamW
 
 from guided_diffusion_hfai import dist_util, logger
 from guided_diffusion_hfai.fp16_util import MixedPrecisionTrainer
-from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_MNIST
+from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_MNIST, load_dataset_MNIST_nosampler
 from guided_diffusion_hfai.resample import create_named_schedule_sampler
 from guided_diffusion_hfai.script_util import (
     add_dict_to_argparser,
     args_to_dict,
     classifier_and_diffusion_defaults,
-    create_classifier_and_diffusion_infodiff,
+    create_classifier_and_diffusion,
+    create_classifierinfoq_and_diffusion_infodiff
 )
 from guided_diffusion_hfai.losses import kdloss, kdloss_gb, NormalNLLLoss
-from guided_diffusion_hfai.train_util import parse_resume_step_from_filename, log_loss_dict, model_entropy
+from guided_diffusion_hfai.train_util import parse_resume_step_from_filename, log_loss_dict
 
 
-def main(local_rank):
+def main():
     args = create_argparser().parse_args()
     save_model_folder = os.path.join(args.logdir, "models")
     os.makedirs(save_model_folder, exist_ok=True)
-    dist_util.setup_dist(local_rank)
 
     alpha_e = args.alphae
+    log_folder = os.path.join(
+        args.logdir,
+        "logs"
+    )
+
+    logger.configure(log_folder, rank=0)
+
+    logger.log("creating model and diffusion...")
+
     num_cat = args.cat_num
     cat_dim = args.cat_dim
     num_con = args.con_num
     output_channels = num_con * 2 + cat_dim * num_cat
 
-
-    log_folder = os.path.join(
-        args.logdir,
-        "logs"
-    )
-    if dist.get_rank() == 0:
-        logger.configure(log_folder, rank=dist.get_rank())
-    else:
-        logger.configure(rank=dist.get_rank())
-    logger.log("creating model and diffusion...")
-
-    model, diffusion = create_classifier_and_diffusion_infodiff(output_channels=output_channels,
-        **args_to_dict(args, classifier_and_diffusion_defaults().keys() )
-    )
+    model, model_clean, diffusion = create_classifierinfoq_and_diffusion_infodiff(output_channels=output_channels,
+                                                                                  **args_to_dict(args,
+                                                                                                 classifier_and_diffusion_defaults().keys())
+                                                                                  )
     model.to(dist_util.dev())
+    # model_clean = model_clean.to(dist_util.dev())
     if args.noised:
         schedule_sampler = create_named_schedule_sampler(
             args.schedule_sampler, diffusion
@@ -95,20 +95,22 @@ def main(local_rank):
             model.load_state_dict(dist_util.load_state_dict(latest_model))
 
     # Needed for creating correct EMAs and fp16 parameters.
-    dist_util.sync_params(model.parameters())
+    # dist_util.sync_params(model.parameters())
 
     mp_trainer = MixedPrecisionTrainer(
         model=model, use_fp16=args.classifier_use_fp16, initial_lg_loss_scale=16.0
     )
-
-    model = DDP(
-        model,
-        device_ids=[dist_util.dev()],
-        # output_device=dist_util.dev(),
-        broadcast_buffers=False,
-        # bucket_cap_mb=128,
-        find_unused_parameters=False,
-    )
+    model = model.to(dist_util.dev())
+    model_clean = model_clean.to(dist_util.dev())
+    model_clean.eval()
+    # model = DDP(
+    #     model,
+    #     device_ids=[dist_util.dev()],
+    #     # output_device=dist_util.dev(),
+    #     broadcast_buffers=False,
+    #     # bucket_cap_mb=128,
+    #     find_unused_parameters=False,
+    # )
 
     logger.log("creating data loader...")
     # data = load_data(
@@ -118,7 +120,7 @@ def main(local_rank):
     #     class_cond=True,
     #     random_crop=True,
     # )
-    data = load_dataset_MNIST(
+    data = load_dataset_MNIST_nosampler(
         train=True, batch_size=args.batch_size, class_cond=True
     )
     if args.val_data_dir:
@@ -128,7 +130,7 @@ def main(local_rank):
         #     image_size=args.image_size,
         #     class_cond=True,
         # )
-        val_data = load_dataset_MNIST(
+        val_data = load_dataset_MNIST_nosampler(
             train=True, batch_size=args.batch_size, class_cond=True)
     else:
         val_data = None
@@ -154,9 +156,8 @@ def main(local_rank):
                 logger.log(f"Training from {step}")
                 resume_step = step
 
-    # define loss
-    nll_loss = NormalNLLLoss()
 
+    nll_loss = NormalNLLLoss()
     logger.log("training variational prediction classifier model...")
 
     def forward_backward_log(data_loader, prefix="train"):
@@ -174,32 +175,47 @@ def main(local_rank):
         for i, (sub_batch, sub_batch_noises, sub_gt_labels, sub_t) in enumerate(
             split_microbatches(args.microbatch, batch, batch_noise, labels, t)
         ):
-
-            clean_logits = model(sub_batch, timesteps=t_clean)
+            # ce loss
+            clean_disc, q_mu, q_var = model_clean(sub_batch)
 
             noise_logits = model(sub_batch_noises, timesteps=sub_t)
-
-            loss_ce = F.cross_entropy(noise_logits[:, :(cat_dim * num_cat)], th.argmax(clean_logits[:, :(cat_dim * num_cat)].detach(), 1).to(dist_util.dev()),
-                                      reduction="none")
+            loss_kd_transfer = kdloss(noise_logits[:, :(cat_dim * num_cat)], clean_disc.detach())
             # mse loss
-            loss_mse = torch.mean(F.mse_loss(noise_logits[:, (cat_dim * num_cat):],
-                                             clean_logits[:, (cat_dim * num_cat):].detach(),
-                                             reduction='none'), dim=1)
 
-            # entropy loss
-            discrete_softmax = F.softmax(clean_logits[:, :(cat_dim * num_cat)])
-            continuous_norm = F.sigmoid(clean_logits[:, (cat_dim * num_cat):])
-            norm_clean_logits = torch.cat((discrete_softmax, continuous_norm), dim=1)
-            loss_entropy = model_entropy(norm_clean_logits)
+            q_mu_var = torch.cat((q_mu, q_var), dim=1).to(dist_util.dev()).detach()
+            mu_noise = noise_logits[:, (cat_dim * num_cat): ((cat_dim * num_cat) + num_con)]
+            var_noise = torch.exp(noise_logits[:, ((cat_dim * num_cat) + num_con):])
 
-            loss = loss_ce + alpha_e * loss_entropy + loss_mse
+            logits_mu_var_noise = torch.cat((mu_noise, var_noise), dim=1).to(dist_util.dev())
+
+            loss_mse_transfer = torch.mean(F.mse_loss(logits_mu_var_noise,
+                                                      q_mu_var,
+                                                      reduction='none'), dim=1)
+
+            # guidance cat loss
+            clean_logits = model(sub_batch, timesteps=t_clean)
+            loss_ce_guidance = F.cross_entropy(noise_logits[:, :(cat_dim * num_cat)],
+                                               th.argmax(clean_logits[:, :(cat_dim * num_cat)].detach(), 1).to(
+                                                   dist_util.dev()),
+                                               reduction="none")
+            # guidance con loss
+            mu_clean = clean_logits[:, (cat_dim * num_cat): ((cat_dim * num_cat) + num_con)]
+            var_clean = torch.exp(clean_logits[:, ((cat_dim * num_cat) + num_con):])
+
+            # logits_mu_var = torch.cat((mu_clean, var_clean), dim=1).to(dist_util.dev())
+
+            x_clean = mu_clean.detach() + th.rand_like(var_clean).to(dist_util.dev()) * var_clean.detach()
+            loss_con_guidance = nll_loss(x_clean, mu_noise, var_noise)
+
+            loss = loss_kd_transfer + loss_mse_transfer + loss_ce_guidance + loss_con_guidance
 
             losses = dict()
 
             losses[f"{prefix}_loss"] = loss.detach()
-            losses[f"{prefix}_loss_ce"] = loss_ce.detach()
-            losses[f"{prefix}_loss_entropy"] = loss_entropy.detach().repeat(loss_ce.shape)
-            losses[f"{prefix}_loss_mse"] = loss_mse.detach()
+            losses[f"{prefix}_loss_kd"] = loss_kd_transfer.detach()
+            losses[f"{prefix}_loss_mse"] = loss_mse_transfer.detach()
+            losses[f"{prefix}_loss_g_cat"] = loss_ce_guidance.detach()
+            losses[f"{prefix}_loss_g_con"] = loss_con_guidance.detach()
 
             log_loss_dict(diffusion, sub_t, losses)
             del losses
@@ -208,6 +224,7 @@ def main(local_rank):
                 if i == 0:
                     mp_trainer.zero_grad()
                 mp_trainer.backward(loss * len(sub_batch) / len(batch))
+
     data_iter = iter(data)
     if val_data is not None:
         val_iter = iter(val_data)
@@ -216,7 +233,7 @@ def main(local_rank):
         logger.logkv("step", step + resume_step)
         logger.logkv(
             "samples",
-            (step + resume_step + 1) * args.batch_size * dist.get_world_size(),
+            (step + resume_step + 1) * args.batch_size ,
         )
         if args.anneal_lr:
             set_annealed_lr(opt, args.lr, (step + resume_step) / args.iterations)
@@ -232,19 +249,18 @@ def main(local_rank):
             logger.dumpkvs()
         if (
             step
-            and dist.get_rank() == 0
             and not (step + resume_step) % args.save_interval
         ):
             logger.log("saving model...")
             save_model(mp_trainer, opt, step + resume_step, save_model_folder)
-        if step % 1000 == 0 and dist.get_rank() == 0 and step != 0:
+        if step % 1000 == 0 and step != 0:
             logger.log("Saving latest model")
             save_model_latest(mp_trainer, opt, step+resume_step, save_model_folder)
 
-    if dist.get_rank() == 0:
-        logger.log("saving model...")
-        save_model(mp_trainer, opt, step + resume_step, save_model_folder)
-    dist.barrier()
+
+    logger.log("saving model...")
+    save_model(mp_trainer, opt, step + resume_step, save_model_folder)
+    # dist.barrier()
 
 
 def set_annealed_lr(opt, base_lr, frac_done):
@@ -254,21 +270,20 @@ def set_annealed_lr(opt, base_lr, frac_done):
 
 
 def save_model(mp_trainer, opt, step, model_folder="runs", latest=False):
-    if dist.get_rank() == 0:
-        th.save(
-            mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
-            os.path.join(model_folder, f"model{step:06d}.pt"),
-        )
-        th.save(opt.state_dict(), os.path.join(model_folder, f"opt{step:06d}.pt"))
+
+    th.save(
+        mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
+        os.path.join(model_folder, f"model{step:06d}.pt"),
+    )
+    th.save(opt.state_dict(), os.path.join(model_folder, f"opt{step:06d}.pt"))
 
 def save_model_latest(mp_trainer, opt, step, model_folder="runs"):
-    if dist.get_rank() == 0:
-        th.save(
-            mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
-            os.path.join(model_folder, "latest.pt"),
-        )
-        th.save({'opt': opt.state_dict(),
-                 'step': step}, os.path.join(model_folder, "optlatest.pt"))
+    th.save(
+        mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
+        os.path.join(model_folder, "latest.pt"),
+    )
+    th.save({'opt': opt.state_dict(),
+             'step': step}, os.path.join(model_folder, "optlatest.pt"))
 
 
 def compute_top_k(logits, labels, k, reduction="mean"):
@@ -313,7 +328,7 @@ def create_argparser():
         eval_interval=5,
         save_interval=10000,
         logdir="runs",
-        alphae=0.1,
+        alphae=0.2,
         cat_num=1,
         cat_dim=10,
         con_num=2
@@ -323,7 +338,11 @@ def create_argparser():
     add_dict_to_argparser(parser, defaults)
     return parser
 
+def model_entropy(x_pred):
+    # compute entropy loss
+    x_pred = torch.mean(x_pred, dim=0)
+    loss = x_pred * torch.log(x_pred + 1e-20)
+    return torch.sum(loss)
 
 if __name__ == "__main__":
-    ngpus = th.cuda.device_count()
-    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)
+    main()

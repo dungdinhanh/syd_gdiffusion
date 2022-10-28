@@ -23,10 +23,10 @@ def load_numpy_to_image(array, folder_path):
     pass
 
 
-def load_numpy_labels_to_image(array1, array2, folder_path):
+def load_numpy_labels_to_grayimage(array1, array2, folder_path):
     for i in range(len(array1)):
         img = np.squeeze(array1[i], axis=-1)
-        im = Image.fromarray(img, "L")
+        im = Image.fromarray(img, "L") # for RGB use different
         im.save(os.path.join(folder_path, f"%d_image%d.png"%(int(array2[i]), i)))
 
 
@@ -41,4 +41,4 @@ if __name__ == '__main__':
     folder_images = os.path.join(os.path.dirname(file_numpy), "images")
     os.makedirs(folder_images, exist_ok=True)
     images_array, labels = read_file_to_numpy(file_numpy)
-    load_numpy_labels_to_image(images_array, labels, folder_images)
+    load_numpy_labels_to_grayimage(images_array, labels, folder_images)

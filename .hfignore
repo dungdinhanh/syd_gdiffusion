@@ -1,0 +1,25 @@
+# ide generated config
+.vscode
+.idea
+# git
+.git
+.gitignore
+.gitattributes
+# python generated
+__pycache__
+*.py[cod]
+*$py.class
+# python package
+eggs/
+".eggs/"
+*.egg-info/
+*.egg
+wheels/
+share/python-wheels/
+# runs/
+# For the model/ remember to comment when needs pushing new model
+models/64x64_classifier.pt
+models/64x64_diffusion.pt
+models/cifar10_uncond_vlb_50M_500K.pt
+models/model_epoch_100_CelebA.pt
+models/model_epoch_100_MNIST.pt

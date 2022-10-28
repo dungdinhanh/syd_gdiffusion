@@ -14,26 +14,21 @@ from guided_diffusion_hfai.script_util import (
     args_to_dict,
     add_dict_to_argparser,
 )
-from guided_diffusion_hfai.train_util_hfai import TrainLoop
+from guided_diffusion_hfai.train_util import TrainLoop
 import hfai
 import torch as th
 import hfai.nccl.distributed as dist
 
-import hfai.checkpoint
 
-
-def main(local_rank):
+def main():
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist(local_rank)
     log_folder = os.path.join(
         args.logdir,
         "logs"
     )
-    if dist.get_rank() == 0:
-        logger.configure(log_folder, rank=dist.get_rank())
-    else:
-        logger.configure(rank=dist.get_rank())
+
+    logger.configure(log_folder, rank = 0)
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -93,5 +88,4 @@ def create_argparser():
 
 
 if __name__ == "__main__":
-    ngpus = th.cuda.device_count()
-    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)
+    main()
