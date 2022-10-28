@@ -14,7 +14,7 @@ name="sampling_dbg_ddim_s"
 MODEL_FLAGS="--image_size 28 --num_channels 32 --num_res_blocks 2 --attention_resolutions 7,4 --diffusion_steps 1000 --dropout 0.1 --noise_schedule cosine
  --num_head_channels 8 --resblock_updown True --use_new_attention_order True --use_fp16 True --use_scale_shift_norm True --learn_sigma True"
 #SAMPLE_FLAGS1="--batch_size 1001 --num_samples 10000 --timestep_respacing 250"
-SAMPLE_FLAGS2="--batch_size 1001 --num_samples 10000 --timestep_respacing 250 "
+SAMPLE_FLAGS2="--batch_size 1001 --num_samples 10000 --timestep_respacing 250 --use_ddim True"
 
 cmd="${cd_cmd} python scripts_hfai_local/classifier_sample_local.py --classifier_path ${cpath} \
 --model_path ${mpath} --logdir ${opath}/${name}_ema4/ --classifier_scale 4.0 \

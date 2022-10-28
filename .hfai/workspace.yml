@@ -1,0 +1,3 @@
+local: /home/dzung/unisyddev/guided-diffusion
+remote: group_xuchang/xuchang/workspaces/gdiffusion
+workspace: gdiffusion
