@@ -16,10 +16,14 @@ def read_file_to_numpy(file):
     pass
 
 
-def load_numpy_to_image(array, folder_path):
-    for i in range(len(array)):
-        im = Image.fromarray(array[i], "L")
-        im.save(os.path.join(folder_path, f"image%d.png"%i))
+def load_numpy_labels_to_image(array1, array2, folder_path):
+    for i in range(len(array1)):
+        # img = np.squeeze(array1[i], axis=-1)
+        im = Image.fromarray(array1[i], "RGB")
+        img_name = "image"
+        for idx_class in range(len(array2[i])):
+            img_name += f"{array2[i][idx_class]}"
+        im.save(os.path.join(folder_path, f"{img_name}_{i}.png"))
     pass
 
 
@@ -32,6 +36,7 @@ def load_numpy_labels_to_grayimage(array1, array2, folder_path):
 
 parser = argparse.ArgumentParser("numpy to images")
 parser.add_argument("--numpy", help="numpy files", default="../outputhfai/runs/")
+parser.add_argument("--rgb", action="store_true", help="process rbg")
 
 
 
@@ -41,4 +46,7 @@ if __name__ == '__main__':
     folder_images = os.path.join(os.path.dirname(file_numpy), "images")
     os.makedirs(folder_images, exist_ok=True)
     images_array, labels = read_file_to_numpy(file_numpy)
-    load_numpy_labels_to_grayimage(images_array, labels, folder_images)
+    if not args.rgb:
+        load_numpy_labels_to_grayimage(images_array, labels, folder_images)
+    else:
+        load_numpy_labels_to_image(images_array, labels, folder_images)

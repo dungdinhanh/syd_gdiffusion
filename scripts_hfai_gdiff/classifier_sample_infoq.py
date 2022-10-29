@@ -99,6 +99,11 @@ def main(local_rank):
 
     logger.log("Looking for previous file")
     checkpoint = os.path.join(output_images_folder, "samples_last.npz")
+    final_file = os.path.join(output_images_folder, f"samples_{args.num_samples}x{args.image_size}x{args.image_size}x3.npz")
+    if os.path.isfile(final_file):
+        dist.barrier()
+        logger.log("sampling complete")
+        return
     if os.path.isfile(checkpoint):
         npzfile = np.load(checkpoint)
         all_images = list(npzfile['arr_0'])
@@ -106,6 +111,7 @@ def main(local_rank):
     else:
         all_images = []
         all_labels = []
+    logger.log(f"Number of current images: {len(all_images)}")
     logger.log("sampling...")
     if args.image_size == 28:
         img_channels = 1

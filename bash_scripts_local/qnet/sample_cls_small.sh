@@ -8,7 +8,7 @@ cpath="../outputhfai/runs/mnist_classifier_training/models/model149999.pt"
 #cpath="../outputhfai/local_analyse/twostages_transfer/${name_c}/models/model149999.pt"
 #mpath="../outputhfai/runs/mnist_diffusion_training_1node/models/model200000.pt"
 mpath="../output/runs/mnist/mnist_diff_sigma/models/ema_0.9999_200000.pt"
-opath="../outputhfai/local_analyse/twostages_transfer/${name_c}/ref/"
+opath="../outputhfai/runs/mnist_classifier_training/ref/"
 name="sampling_dbg_ddim_s"
 
 MODEL_FLAGS="--image_size 28 --num_channels 32 --num_res_blocks 2 --attention_resolutions 7,4 --diffusion_steps 1000 --dropout 0.1 --noise_schedule cosine
