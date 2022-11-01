@@ -19,7 +19,8 @@ from torch.optim import AdamW
 
 from guided_diffusion_hfai import dist_util, logger
 from guided_diffusion_hfai.fp16_util import MixedPrecisionTrainer
-from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_MNIST, load_dataset_CelebA
+from guided_diffusion_hfai.image_datasets import load_data_imagenet_hfai, load_dataset_MNIST, load_dataset_CelebA, \
+    load_dataset_CelebAUP
 from guided_diffusion_hfai.resample import create_named_schedule_sampler
 from guided_diffusion_hfai.script_util import (
     add_dict_to_argparser,
@@ -30,6 +31,7 @@ from guided_diffusion_hfai.script_util import (
 from guided_diffusion_hfai.losses import kdloss, kdloss_gb, NormalNLLLoss
 from guided_diffusion_hfai.train_util import parse_resume_step_from_filename, log_loss_dict, model_entropy
 import hfai.client
+
 
 def main(local_rank):
     args = create_argparser().parse_args()
@@ -131,7 +133,7 @@ def main(local_rank):
     #     class_cond=True,
     #     random_crop=True,
     # )
-    data = load_dataset_CelebA(
+    data = load_dataset_CelebAUP(
         train=True, image_size=args.image_size,
         batch_size=args.batch_size, random_crop=True, class_cond=False
     )
@@ -143,10 +145,8 @@ def main(local_rank):
         #     image_size=args.image_size,
         #     class_cond=True,
         # )
-        load_dataset_CelebA(
-            train=True, image_size=args.image_size,
-            batch_size=args.batch_size, random_crop=True, class_cond=False
-        )
+        val_data = load_dataset_CelebAUP(
+            train=True, batch_size=args.batch_size, class_cond=False)
     else:
         val_data = None
 
@@ -176,10 +176,11 @@ def main(local_rank):
     logger.log("training variational prediction classifier model...")
 
     def forward_backward_log(data_loader, prefix="train"):
-        batch, extra = next(data_loader)
+        batch32, batch, extra = next(data_loader)
         # labels = extra["y"].to(dist_util.dev())
 
         batch = batch.to(dist_util.dev())
+        batch32 = batch32.to(dist_util.dev())
         # Noisy images
 
         t, _ = schedule_sampler.sample(batch.shape[0], dist_util.dev())
@@ -187,20 +188,21 @@ def main(local_rank):
 
         t_clean = th.zeros(batch.shape[0], dtype=th.long, device=dist_util.dev())
 
-        for i, (sub_batch, sub_batch_noises, sub_t) in enumerate(
-            split_microbatches(args.microbatch, batch, batch_noise, t)
+        for i, (sub_batch32, sub_batch, sub_batch_noises, sub_t) in enumerate(
+            split_microbatches(args.microbatch, batch32, batch, batch_noise, t)
         ):
-            # note that this is scheme 9 (not 11) change name later
-            clean_disc, q_mu, q_var = model_clean(sub_batch)
+
+            clean_disc, q_mu, q_var = model_clean(sub_batch32)
+
             # transfer______________________________________________________________________
             noise_logits = model(sub_batch_noises, timesteps=sub_t)
             clean_logits = model(sub_batch, timesteps=t_clean)
 
             clean_disc_detach = clean_disc.detach()
             loss_kd = 0.0
-            for cat_index in range(num_cat-1):
-                loss_kd += kdloss(clean_logits[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))],
-                                 clean_disc_detach[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))])
+            for cat_index in range(num_cat - 1):
+                loss_kd += kdloss(clean_logits[:, (cat_dim * cat_index): (cat_dim * (cat_index + 1))],
+                                  clean_disc_detach[:, (cat_dim * cat_index): (cat_dim * (cat_index + 1))])
 
             # mse loss
             if num_con != 0:
@@ -221,9 +223,10 @@ def main(local_rank):
 
             clean_logits_detach = clean_logits.detach()
             loss_ce_guidance = 0.0
-            for cat_index in range(num_cat-1):
-                loss_ce_guidance += kdloss(noise_logits[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))],
-                                 clean_logits_detach[:, (cat_dim * cat_index) : (cat_dim * (cat_index+1))])
+            for cat_index in range(num_cat - 1):
+                loss_ce_guidance += kdloss(noise_logits[:, (cat_dim * cat_index): (cat_dim * (cat_index + 1))],
+                                           clean_logits_detach[:,
+                                           (cat_dim * cat_index): (cat_dim * (cat_index + 1))])
 
             if num_con != 0:
                 mu_noise = noise_logits[:, (cat_dim * num_cat): ((cat_dim * num_cat) + num_con)]
@@ -232,8 +235,8 @@ def main(local_rank):
                 logits_mu_var = torch.cat((mu_noise, var_noise), dim=1).to(dist_util.dev())
 
                 loss_con_guidance = torch.mean(F.mse_loss(logits_mu_var,
-                                                logits_mu_var_clean.detach(),
-                                                 reduction='none'), dim=1)
+                                                          logits_mu_var_clean.detach(),
+                                                          reduction='none'), dim=1)
             else:
                 loss_con_guidance = torch.zeros((noise_logits.shape[0],)).to(dist_util.dev())
 
@@ -246,7 +249,6 @@ def main(local_rank):
             losses[f"{prefix}_loss_mse"] = loss_mse.detach()
             losses[f"{prefix}_loss_ce_guidance"] = loss_ce_guidance.detach()
             losses[f"{prefix}_loss_con_guidance"] = loss_con_guidance.detach()
-
 
             log_loss_dict(diffusion, sub_t, losses)
             del losses
@@ -292,6 +294,7 @@ def main(local_rank):
             save_model_latest(mp_trainer, opt, step + resume_step, save_model_folder)
             logger.log(f"step {step + resume_step}, client has suspended. Good luck next run ^^")
             hfai.client.go_suspend()
+
 
     if dist.get_rank() == 0:
         logger.log("saving model...")

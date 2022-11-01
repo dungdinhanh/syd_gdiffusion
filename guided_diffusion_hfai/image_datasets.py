@@ -137,6 +137,26 @@ def load_dataset_CelebA(*,
     while True:
         yield from loader
 
+def load_dataset_CelebAUP(*,
+                        train=True,
+                        batch_size,
+                        class_cond=True,
+                        random_crop=False,
+                        random_flip=True,
+                        image_size):
+    # get two instances 1 32 1 image_size
+    os.makedirs("./data", exist_ok=True)
+    if train:
+        dataset = CelebA32UPHF(root="./data/", classes=class_cond, split='train', resolution=image_size,
+                           random_crop=random_crop, random_flip=random_flip)
+    else:
+        dataset = CelebA32UPHF(root="./data/", classes=class_cond, split='val', resolution=image_size,
+                           random_crop=random_crop, random_flip=random_flip)
+    data_sampler = DistributedSampler(dataset, shuffle=True)
+    loader = dataset.loader(batch_size, num_workers=8, sampler=data_sampler, pin_memory=True)
+    while True:
+        yield from loader
+
 def load_dataset_CelebA64(*,
                         train=True,
                         batch_size,
