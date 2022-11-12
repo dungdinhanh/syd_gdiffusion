@@ -6,9 +6,9 @@ from guided_diffusion_hfai.image_datasets import load_dataset_MNIST_nosampler, l
 from PIL import Image
 import torch
 
-temp_data = load_dataset_CelebA_nosampler(train=True, batch_size=1024, class_cond=True, image_size=32)
+temp_data = load_dataset_CelebA_nosampler(train=True, batch_size=1024, class_cond=True, image_size=64)
 nb_images = 50000
-save_folder = os.path.join("../output/data", "CelebA32")
+save_folder = os.path.join("../output/data", "CelebA64")
 
 raw_images_folder = os.path.join(save_folder, "images")
 os.makedirs(raw_images_folder, exist_ok=True)

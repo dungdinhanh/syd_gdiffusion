@@ -9,9 +9,10 @@ import os
 import numpy as np
 import torch as th
 # import torch.distributed as dist
-import hfai.nccl.distributed as dist
+# import hfai.nccl.distributed as dist
 import torch.nn.functional as F
 import hfai
+
 from guided_diffusion_hfai import dist_util, logger
 from guided_diffusion_hfai.script_util import (
     NUM_CLASSES,
@@ -25,7 +26,8 @@ from guided_diffusion_hfai.script_util import (
 )
 import datetime
 from PIL import Image
-
+import matplotlib.pyplot as plt
+import torchvision.utils as vutils
 
 def main():
     args = create_argparser().parse_args()
@@ -41,12 +43,12 @@ def main():
         "logs",
     )
 
-    logger.configure(save_folder, rank=0)
+    # logger.configure(save_folder, rank=0)
 
     output_images_folder = os.path.join(args.logdir, "reference")
     os.makedirs(output_images_folder, exist_ok=True)
 
-    logger.log("creating model and diffusion...")
+    print("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
@@ -59,7 +61,7 @@ def main():
     model.eval()
 
 
-    logger.log("loading classifier...")
+    print("loading classifier...")
     classifier = create_classifier_infodiff(out_channels=output_channels,
                                             **args_to_dict(args, classifier_defaults().keys()))
     classifier.load_state_dict(
@@ -96,72 +98,82 @@ def main():
         # assert con is not None
         return model(x, t, y if args.class_cond else None)
 
-    logger.log("Looking for previous file")
-    checkpoint = os.path.join(output_images_folder, "samples_last.npz")
-    final_file = os.path.join(output_images_folder, f"samples_{args.num_samples}x{args.image_size}x{args.image_size}x3.npz")
-    if os.path.isfile(final_file):
-        dist.barrier()
-        logger.log("sampling complete")
-        return
-    if os.path.isfile(checkpoint):
-        npzfile = np.load(checkpoint)
-        all_images = list(npzfile['arr_0'])
-        all_labels = list(npzfile['arr_1'])
-    else:
-        all_images = []
-        all_labels = []
-    logger.log(f"Number of current images: {len(all_images)}")
-    logger.log("sampling...")
+    print("Looking for previous file")
+    # checkpoint = os.path.join(output_images_folder, "samples_last.npz")
+    # final_file = os.path.join(output_images_folder, f"samples_{args.num_samples}x{args.image_size}x{args.image_size}x3.npz")
+    # if os.path.isfile(final_file):
+    #     print("sampling complete")
+    #     return
+    # if os.path.isfile(checkpoint):
+    #     npzfile = np.load(checkpoint)
+    #     all_images = list(npzfile['arr_0'])
+    #     all_labels = list(npzfile['arr_1'])
+    # else:
+    all_images = []
+    all_labels = []
+    print(f"Number of current images: {len(all_images)}")
+    print("sampling...")
     if args.image_size == 28:
         img_channels = 1
         num_class = 10
     else:
         img_channels = 3
         num_class = NUM_CLASSES
-    while len(all_images) * args.batch_size < args.num_samples:
+    current_dim_cat = 0
+    while len(all_images) < num_cat:
         model_kwargs = {}
         classes = th.randint(
-            low=0, high=cat_dim, size=(args.batch_size, num_cat), device=dist_util.dev()
+            low=0, high=cat_dim, size=(num_cat,), device=dist_util.dev()
         )
+        classes = classes.repeat(cat_dim, 1)
+        classes[:, current_dim_cat] = th.arange(0, cat_dim, device=dist_util.dev())
+        classes = th.repeat_interleave(classes, 10, dim=0)
         model_kwargs["y"] = classes
         sample_fn = (
             diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
         )
         sample = sample_fn(
             model_fn,
-            (args.batch_size, img_channels, args.image_size, args.image_size),
+            (cat_dim * 10, img_channels, args.image_size, args.image_size),
             clip_denoised=args.clip_denoised,
             model_kwargs=model_kwargs,
             cond_fn=cond_fn,
             device=dist_util.dev(),
         )
         sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
-        sample = sample.permute(0, 2, 3, 1)
+        # sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
-
+        # print(sample.shape)
+        # exit(0)
         gathered_samples = [sample]
-        batch_images = [sample.cpu().numpy() for sample in gathered_samples]
+        batch_images = [sample.cpu() for sample in gathered_samples]
         all_images.extend(batch_images)
         gathered_labels = [classes]
-        batch_labels = [labels.cpu().numpy() for labels in gathered_labels]
+        batch_labels = [labels.cpu() for labels in gathered_labels]
         all_labels.extend(batch_labels)
 
-        logger.log(f"created {len(all_images) * args.batch_size} samples")
-        np.savez(checkpoint, np.stack(all_images), np.stack(all_labels))
+        # print(f"created {len(all_images) * args.batch_size} samples")
+        # np.savez(checkpoint, np.stack(all_images), np.stack(all_labels))
+        # current_dim_cat += 1
 
-    arr = np.concatenate(all_images, axis=0)
-    arr = arr[: args.num_samples]
-    label_arr = np.concatenate(all_labels, axis=0)
-    label_arr = label_arr[: args.num_samples]
-
-    shape_str = "x".join([str(x) for x in arr.shape])
-    out_path = os.path.join(output_images_folder, f"samples_{shape_str}.npz")
-    logger.log(f"saving to {out_path}")
-    np.savez(out_path, arr, label_arr)
-    os.remove(checkpoint)
-
-    dist.barrier()
-    logger.log("sampling complete")
+    for i in range(len(all_images)):
+        fig = plt.figure(figsize=(10, 10))
+        plt.axis("off")
+        plt.imshow(np.transpose(vutils.make_grid(all_images[i], nrow=10, padding=2), (1, 2, 0)))
+        plt.savefig(os.path.join(output_images_folder, f"feature_{i}.png"))
+    # arr = np.concatenate(all_images, axis=0)
+    # arr = arr[: args.num_samples]
+    # label_arr = np.concatenate(all_labels, axis=0)
+    # label_arr = label_arr[: args.num_samples]
+    #
+    # shape_str = "x".join([str(x) for x in arr.shape])
+    # out_path = os.path.join(output_images_folder, f"samples_{shape_str}.npz")
+    # print(f"saving to {out_path}")
+    # np.savez(out_path, arr, label_arr)
+    # os.remove(checkpoint)
+    #
+    # dist.barrier()
+    # print("sampling complete")
 
 
 def create_argparser():
