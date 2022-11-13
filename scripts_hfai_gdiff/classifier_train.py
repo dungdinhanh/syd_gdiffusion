@@ -28,6 +28,7 @@ from guided_diffusion_hfai.script_util import (
     create_classifier_and_diffusion,
 )
 from guided_diffusion_hfai.train_util import parse_resume_step_from_filename, log_loss_dict
+import hfai.client
 
 
 def main(local_rank):
@@ -145,7 +146,7 @@ def main(local_rank):
                 logger.log(f"Loading optimizer state from checkpoint: {opt_checkpoint}")
                 opt_dict = dist_util.load_state_dict(opt_checkpoint)
                 opt.load_state_dict(opt_dict["opt"])
-                step = opt_dict['step']
+                step = opt_dict['step'] + 1
                 logger.log(f"Training from {step}")
                 resume_step = step
 
@@ -215,12 +216,23 @@ def main(local_rank):
         ):
             logger.log("saving model...")
             save_model(mp_trainer, opt, step + resume_step, save_model_folder)
-        if step % 1000 == 0 and dist.get_rank() == 0:
+        if step % 1000 == 0 and dist.get_rank() == 0 and step != 0:
+            logger.log("Saving latest model")
             save_model_latest(mp_trainer, opt, step+resume_step, save_model_folder)
+        elif dist.get_rank() == 0 and hfai.client.receive_suspend_command():
+            if step != 0:
+                logger.log("Saving latest model")
+                save_model_latest(mp_trainer, opt, step + resume_step, save_model_folder)
+                logger.log(f"step {step + resume_step}, client has suspended. Good luck next run ^^")
+            else:
+                logger.log(f"Do not save latest model due to the risk from the first iteration at step {step}")
+                logger.log(f"step {step + resume_step - 1}, client has suspended. Good luck next run ^^")
+            hfai.client.go_suspend()
 
     if dist.get_rank() == 0:
         logger.log("saving model...")
         save_model(mp_trainer, opt, step + resume_step, save_model_folder)
+
     dist.barrier()
 
 
@@ -278,9 +290,9 @@ def create_argparser():
         microbatch=-1,
         schedule_sampler="uniform",
         resume_checkpoint="",
-        log_interval=10,
+        log_interval=500,
         eval_interval=5,
-        save_interval=10000,
+        save_interval=25000,
         logdir="runs"
     )
     defaults.update(classifier_and_diffusion_defaults())

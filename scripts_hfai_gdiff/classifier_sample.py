@@ -79,6 +79,12 @@ def main(local_rank):
 
     logger.log("Looking for previous file")
     checkpoint = os.path.join(output_images_folder, "samples_last.npz")
+    final_file = os.path.join(output_images_folder,
+                              f"samples_{args.num_samples}x{args.image_size}x{args.image_size}x3.npz")
+    if os.path.isfile(final_file):
+        dist.barrier()
+        logger.log("sampling complete")
+        return
     if os.path.isfile(checkpoint):
         npzfile = np.load(checkpoint)
         all_images = list(npzfile['arr_0'])
@@ -86,6 +92,7 @@ def main(local_rank):
     else:
         all_images = []
         all_labels = []
+    logger.log(f"Number of current images: {len(all_images)}")
     logger.log("sampling...")
     if args.image_size == 28:
         img_channels = 1
@@ -126,15 +133,6 @@ def main(local_rank):
             logger.log(f"created {len(all_images) * args.batch_size} samples")
             np.savez(checkpoint, np.stack(all_images), np.stack(all_labels))
 
-        #     for i in range(len(batch_images)):
-        #         # print(batch_images[0].shape)
-        #         # print(len(batch_images))
-        #         # exit(0)
-        #         for j in range(len(batch_images[i])):
-        #             im = Image.fromarray(batch_images[i][j], "RGB")
-        #             im.save(os.path.join(output_images_folder, "%d_image%d.png"%(batch_labels[i][j], count_image)))
-        #             count_image += 1
-
     arr = np.concatenate(all_images, axis=0)
     arr = arr[: args.num_samples]
     label_arr = np.concatenate(all_labels, axis=0)
@@ -153,7 +151,7 @@ def main(local_rank):
 def create_argparser():
     defaults = dict(
         clip_denoised=True,
-        num_samples=10000,
+        num_samples=50000,
         batch_size=16,
         use_ddim=False,
         model_path="",

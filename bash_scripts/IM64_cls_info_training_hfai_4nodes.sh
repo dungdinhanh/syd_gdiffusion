@@ -15,6 +15,6 @@ eval ${cmd}
 
 
 cmd="python scripts_hfai_gdiff/classifier_train_info.py --data_dir path/to/imagenet \
---logdir runs/classifier_training_info_4nodes_rt/ $TRAIN_FLAGS $CLASSIFIER_FLAGS"
+--logdir runs/IM64/IM64classifier_training_info_4nodes/ $TRAIN_FLAGS $CLASSIFIER_FLAGS"
 echo ${cmd}
 eval ${cmd}
