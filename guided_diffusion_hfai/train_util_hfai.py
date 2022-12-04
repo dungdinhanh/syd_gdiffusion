@@ -129,10 +129,19 @@ class TrainLoop:
 
         if resume_checkpoint:
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint) + 1
-            self.state_load_state_dict = load(resume_checkpoint, map_location='cpu')
-            logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
-            self.model.load_state_dict(self.state_load_state_dict['model'])
+            if dist.get_rank() == 0:
+                print(f"Training from {self.resume_step}")
+                logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
+                self.model.load_state_dict(
+                    dist_util.load_state_dict(
+                        resume_checkpoint, map_location=dist_util.dev()
+                    )
+                )
             self.load_last_checkpoint = False
+            # self.state_load_state_dict = load(resume_checkpoint, map_location='cpu')
+            # logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
+            # self.model.load_state_dict(self.state_load_state_dict['model'])
+            # self.load_last_checkpoint = False
         else:
             last_checkpoint = find_resume_checkpoint(self.logdir)
             if last_checkpoint is not None:
@@ -151,9 +160,12 @@ class TrainLoop:
         main_checkpoint = self.resume_checkpoint
         ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.resume_step, rate)
         if ema_checkpoint:
-            logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
-            state_dict = load(ema_checkpoint, map_location='cpu')['model']
-            ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
+            if dist.get_rank() == 0:
+                logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
+                state_dict = dist_util.load_state_dict(
+                    ema_checkpoint, map_location=dist_util.dev()
+                )
+                ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
         else:
             if self.load_last_checkpoint:
                 ema_latest = find_last_ema_checkpoint(self.logdir, rate)
@@ -175,9 +187,10 @@ class TrainLoop:
         )
         if bf.exists(opt_checkpoint):
             logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
-            self.opt.load_state_dict(self.state_load_state_dict['optimizer'])
-            self.resume_step = self.state_load_state_dict['step'] + 1
-            logger.log(f"Train from {self.resume_step}")
+            state_dict = dist_util.load_state_dict(
+                opt_checkpoint, map_location=dist_util.dev()
+            )
+            self.opt.load_state_dict(state_dict)
         else:
             if self.load_last_checkpoint:
                 logger.log(f"Loading optimizer state from latest checkpoint")
@@ -188,6 +201,8 @@ class TrainLoop:
 
 
     def run_loop(self):
+        if self.suspend_signal():
+            hfai.client.go_suspend()
         while (
             not self.lr_anneal_steps
             or self.step + self.resume_step < self.lr_anneal_steps
@@ -388,6 +403,7 @@ def parse_resume_step_from_filename(filename):
     if len(split) < 2:
         return 0
     split1 = split[-1].split(".")[0]
+    split1 = split1.split("_")[0]
     try:
         return int(split1)
     except ValueError:

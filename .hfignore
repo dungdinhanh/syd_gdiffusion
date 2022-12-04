@@ -23,3 +23,14 @@ models/64x64_diffusion.pt
 models/cifar10_uncond_vlb_50M_500K.pt
 models/model_epoch_100_CelebA.pt
 models/model_epoch_100_MNIST.pt
+models/128x128_classfier.pt
+models/128x128_diffusion.pt
+models/256x256_classifier.pt
+models/256x256_diffusion.pt
+models/256x256_diffusion_uncond.pt
+reference/logits_10000x10.npz
+reference/tsne.png
+reference/VIRTUAL_imagenet64_labeled.npz
+reference/VIRTUAL_imagenet128_labeled.npz
+reference/VIRTUAL_imagenet256_labeled.npz
+runs/IM64

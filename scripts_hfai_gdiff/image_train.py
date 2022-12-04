@@ -79,7 +79,7 @@ def create_argparser():
         batch_size=1,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
-        log_interval=10,
+        log_interval=500,
         save_interval=10000,
         resume_checkpoint="",
         use_fp16=False,

@@ -209,7 +209,7 @@ class GaussianDiffusion:
         """
         Compute the mean and variance of the diffusion posterior:
 
-            q(x_{t-1} | x_t, x_0)
+            q(x_{t-1} | x_t, x_0) (equation 7 DDPM)
 
         """
         assert x_start.shape == x_t.shape
