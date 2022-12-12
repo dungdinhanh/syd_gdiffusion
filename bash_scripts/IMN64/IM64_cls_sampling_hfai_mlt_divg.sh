@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SAMPLE_FLAGS="--batch_size 128 --num_samples 50000 --timestep_respacing 250"
+SAMPLE_FLAGS="--batch_size 128 --num_samples 10000 --timestep_respacing 250"
 #TRAIN_FLAGS="--lr 1e-4 --batch_size 128 --schedule_sampler loss-second-moment"
 
 MODEL_FLAGS="--attention_resolutions 32,16,8 --class_cond True --diffusion_steps 1000 --dropout 0.1 --image_size 64 \
@@ -23,16 +23,16 @@ scales=("0" "2" "4")
 
 for scale in "${scales[@]}"
 do
-cmd="python scripts_hfai_gdiff/classifier_sample.py $MODEL_FLAGS --classifier_scale ${scale}.0  \
+cmd="python scripts_hfai_gdiff/multitask/classifier_sample_mlt_diversitygrad.py $MODEL_FLAGS --classifier_scale ${scale}.0  \
 --classifier_path models/64x64_classifier.pt --model_path models/64x64_diffusion.pt $SAMPLE_FLAGS \
- --logdir runs/sampling2/IMN64/conditional/scale${scale}p0/ --classifier_depth 4"
+ --logdir runs/sampling/IMN64/conditional_mlt_divg/scale${scale}p0/ --classifier_depth 4"
 echo ${cmd}
 eval ${cmd}
 done
 
-cmd="python scripts_hfai_gdiff/classifier_sample.py $MODEL_FLAGS --classifier_scale 0.5  \
+cmd="python scripts_hfai_gdiff/multitask/classifier_sample_mlt_diversitygrad.py $MODEL_FLAGS --classifier_scale 0.5  \
 --classifier_path models/64x64_classifier.pt --model_path models/64x64_diffusion.pt $SAMPLE_FLAGS \
- --logdir runs/sampling/IMN64/conditional/scale0p5/ --classifier_depth 4"
+ --logdir runs/sampling/IMN64/conditional_mlt_divg/scale0p5/ --classifier_depth 4"
 echo ${cmd}
 eval ${cmd}
 

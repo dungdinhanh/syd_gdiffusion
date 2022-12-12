@@ -8,3 +8,4 @@ guided_diffusion.egg-info/
 .idea/
 data/
 reference/
+build/

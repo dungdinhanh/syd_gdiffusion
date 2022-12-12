@@ -17,7 +17,7 @@ cmd="ls"
 echo ${cmd}
 eval ${cmd}
 
-scales=("6" "8" "10")
+scales=("0" "2" "4")
 
 for scale in "${scales[@]}"
 do
@@ -27,7 +27,8 @@ echo ${cmd}
 eval ${cmd}
 done
 
+cmd="python scripts_hfai_gdiff/classifier_sample.py $MODEL_FLAGS --classifier_scale 0.5 --classifier_path models/128x128_classifier.pt \
+--model_path models/128x128_diffusion.pt $SAMPLE_FLAGS  --logdir runs/sampling2/IMN128/conditional/scale0p5/"
+echo ${cmd}
+eval ${cmd}
 
-
-#cmd="python scripts_hfai_gdiff/classifier_sample.py --logdir runs/classifier_pretrained/ ${MODEL_FLAGS} --classifier_scale 1.0 --classifier_path models/64x64_classifier.pt \
-# --classifier_depth 4 --model_path models/64x64_diffusion.pt ${SAMPLE_FLAGS}"

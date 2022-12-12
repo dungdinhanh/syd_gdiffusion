@@ -34,3 +34,8 @@ reference/VIRTUAL_imagenet64_labeled.npz
 reference/VIRTUAL_imagenet128_labeled.npz
 reference/VIRTUAL_imagenet256_labeled.npz
 runs/IM64
+data/
+build/
+dist/
+evaluations/classify_image_graph_def.pb
+classify_image_graph_def.pb

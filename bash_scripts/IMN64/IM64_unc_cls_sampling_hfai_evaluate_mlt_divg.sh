@@ -21,13 +21,13 @@ scales=("0" "2" "4" "6" "8" "10")
 for scale in "${scales[@]}"
 do
 cmd="python evaluations/evaluator_tolog.py reference/VIRTUAL_imagenet64_labeled.npz \
- runs/sampling2/IMN64/conditional/scale${scale}p0/reference/samples_50000x64x64x3.npz"
+ runs/sampling/IMN64/unconditional_mlt_divg/scale${scale}p0/reference/samples_10000x64x64x3.npz"
 echo ${cmd}
 eval ${cmd}
 done
 
 cmd="python evaluations/evaluator_tolog.py reference/VIRTUAL_imagenet64_labeled.npz \
- runs/sampling2/IMN64/conditional/scale0p5/reference/samples_50000x64x64x3.npz"
+ runs/sampling/IMN64/unconditional_mlt_divg/scale0p5/reference/samples_10000x64x64x3.npz"
 echo ${cmd}
 eval ${cmd}
 

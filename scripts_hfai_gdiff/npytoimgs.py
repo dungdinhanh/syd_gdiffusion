@@ -18,12 +18,12 @@ def read_file_to_numpy(file):
 
 def load_numpy_labels_to_image(array1, array2, folder_path):
     for i in range(len(array1)):
-        # img = np.squeeze(array1[i], axis=-1)
         im = Image.fromarray(array1[i], "RGB")
         img_name = "image"
-        for idx_class in range(len(array2[i])):
-            img_name += f"{array2[i][idx_class]}"
-        im.save(os.path.join(folder_path, f"{img_name}_{i}.png"))
+        img_name += f"{array2[i]}"
+        im_path = os.path.join(folder_path, f"class_{array2[i]}")
+        os.makedirs(im_path, exist_ok=True)
+        im.save(os.path.join(im_path, f"{img_name}_{i}.png"))
     pass
 
 

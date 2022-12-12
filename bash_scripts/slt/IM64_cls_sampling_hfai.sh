@@ -32,11 +32,11 @@ done
 
 cmd="python scripts_hfai_gdiff/classifier_sample.py $MODEL_FLAGS --classifier_scale 0.5  \
 --classifier_path models/64x64_classifier.pt --model_path models/64x64_diffusion.pt $SAMPLE_FLAGS \
- --logdir runs/sampling/IMN64/conditional/scale0p5/ --classifier_depth 4"
+ --logdir runs/sampling2/IMN64/conditional/scale0p5/ --classifier_depth 4"
 echo ${cmd}
 eval ${cmd}
 
-#cmd="python scripts_hfai_gdiff/classifier_sample.py --logdir runs/sampling/IMN64/conditional/ \
+#cmd="python scripts_hfai_gdiff/classifier_sample.py --logdir runs/sampling2/IMN64/conditional/ \
 # ${MODEL_FLAGS} --classifier_scale 1.0 --classifier_path models/64x64_classifier.pt \
 # --classifier_depth 4 --model_path models/64x64_diffusion.pt ${SAMPLE_FLAGS}"
 #echo ${cmd}
