@@ -2,7 +2,9 @@
 Like image_sample.py, but use a noisy image classifier to guide the sampling
 process towards more realistic images.
 
-PCGrad on each image in batch
+PCGrad on classificaiton - div + classification - diffusion
+
+analyse on magnitude and angles
 """
 
 import argparse
@@ -24,13 +26,11 @@ from guided_diffusion_hfai.script_util import (
     add_dict_to_argparser,
     args_to_dict,
 )
-import hfai.client
 import hfai.multiprocessing
 
-from guided_diffusion_hfai.script_util_mlt import create_model_and_diffusion_mlt2
+from guided_diffusion_hfai.script_util_mlt_analyse import create_model_and_diffusion_analyse # diffusion - classification conflict + classification - diversity conflict
 import datetime
 from PIL import Image
-
 
 
 def main(local_rank):
@@ -49,7 +49,7 @@ def main(local_rank):
     os.makedirs(output_images_folder, exist_ok=True)
 
     logger.log("creating model and diffusion...")
-    model, diffusion = create_model_and_diffusion_mlt2(
+    model, diffusion = create_model_and_diffusion_analyse(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
     model.load_state_dict(
@@ -86,6 +86,7 @@ def main(local_rank):
 
     logger.log("Looking for previous file")
     checkpoint = os.path.join(output_images_folder, "samples_last.npz")
+    checkpoint_analyse_before = os.path.join(output_images_folder, "analyse_last.npz")
     final_file = os.path.join(output_images_folder,
                               f"samples_{args.num_samples}x{args.image_size}x{args.image_size}x3.npz")
     if os.path.isfile(final_file):
@@ -96,9 +97,29 @@ def main(local_rank):
         npzfile = np.load(checkpoint)
         all_images = list(npzfile['arr_0'])
         all_labels = list(npzfile['arr_1'])
+
+        npzbefore = np.load(checkpoint_analyse_before)
+        all_magnitude_cls_before = list(npzbefore['arr_0'])
+        all_magnitude_div_before = list(npzbefore['arr_1'])
+        all_magnitude_diff_before = list(npzbefore['arr_2'])
+
+        all_angle_cls_div_before = list(npzbefore['arr_3'])
+        all_angle_cls_diff_before = list(npzbefore['arr_4'])
+        all_angle_div_diff_before = list(npzbefore['arr_5'])
+
     else:
         all_images = []
         all_labels = []
+
+
+        all_magnitude_cls_before = []
+        all_magnitude_div_before = []
+        all_magnitude_diff_before = []
+
+        all_angle_cls_div_before = []
+        all_angle_cls_diff_before = []
+        all_angle_div_diff_before = []
+
     logger.log(f"Number of current images: {len(all_images)}")
     logger.log("sampling...")
     if args.image_size == 28:
@@ -116,7 +137,7 @@ def main(local_rank):
         sample_fn = (
             diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
         )
-        sample = sample_fn(
+        sample, analyse_before = sample_fn(
             model_fn,
             (args.batch_size, img_channels, args.image_size, args.image_size),
             clip_denoised=args.clip_denoised,
@@ -136,17 +157,52 @@ def main(local_rank):
         dist.all_gather(gathered_labels, classes)
         batch_labels = [labels.cpu().numpy() for labels in gathered_labels]
         all_labels.extend(batch_labels)
+
+
+
+        # before analyse _______________________________________________________
+
+        batch_magnitude_cls_before = gather_analyse_matrix(analyse_before, "magnitude", "cls")
+        all_magnitude_cls_before.extend(batch_magnitude_cls_before)
+
+        batch_magnitude_div_before = gather_analyse_matrix(analyse_before, "magnitude", "div")
+        all_magnitude_div_before.extend(batch_magnitude_div_before)
+
+        batch_magnitude_diff_before = gather_analyse_matrix(analyse_before, "magnitude", "diff")
+        all_magnitude_diff_before.extend(batch_magnitude_diff_before)
+
+        batch_angle_cls_div_before = gather_analyse_matrix(analyse_before, "angle", "cls_div")
+        all_angle_cls_div_before.extend(batch_angle_cls_div_before)
+
+        batch_angle_cls_diff_before = gather_analyse_matrix(analyse_before, "angle", "cls_diff")
+        all_angle_cls_diff_before.extend(batch_angle_cls_diff_before)
+
+        batch_angle_div_diff_before = gather_analyse_matrix(analyse_before, "angle", "div_diff")
+        all_angle_div_diff_before.extend(batch_angle_div_diff_before)
+        list_analyse_before = [all_magnitude_cls_before, all_magnitude_div_before, all_magnitude_diff_before,
+                               all_angle_cls_div_before, all_angle_cls_diff_before, all_angle_div_diff_before]
+
         if dist.get_rank() == 0:
-            if hfai.client.receive_suspend_command():
-                print("Receive suspend - good luck next run ^^")
-                hfai.client.go_suspend()
             logger.log(f"created {len(all_images) * args.batch_size} samples")
             np.savez(checkpoint, np.stack(all_images), np.stack(all_labels))
+
+            np.savez(checkpoint_analyse_before,
+                     np.stack(all_magnitude_cls_before),
+                     np.stack(all_magnitude_div_before),
+                     np.stack(all_magnitude_diff_before),
+                     np.stack(all_angle_cls_div_before),
+                     np.stack(all_angle_cls_diff_before),
+                     np.stack(all_angle_div_diff_before))
+
+
+    analyse_before = concat_analyse(analyse_matrix=list_analyse_before, num_samples=args.num_samples)
 
     arr = np.concatenate(all_images, axis=0)
     arr = arr[: args.num_samples]
     label_arr = np.concatenate(all_labels, axis=0)
     label_arr = label_arr[: args.num_samples]
+
+
     if dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr.shape])
         out_path = os.path.join(output_images_folder, f"samples_{shape_str}.npz")
@@ -154,8 +210,30 @@ def main(local_rank):
         np.savez(out_path, arr, label_arr)
         os.remove(checkpoint)
 
+
+        out_analyse_before = os.path.join(output_images_folder, "analyse.npz")
+        logger.log(f"saving to {out_analyse_before}")
+        np.savez(out_analyse_before, analyse_before[0], analyse_before[1], analyse_before[2],
+                 analyse_before[3], analyse_before[4], analyse_before[5])
+        os.remove(checkpoint_analyse_before)
+
+
     dist.barrier()
     logger.log("sampling complete")
+
+
+def gather_analyse_matrix(analyse_dict, key1, key2):
+    gather_infos  = [th.zeros_like(analyse_dict[key1][key2]) for _ in range(dist.get_world_size())]
+    dist.all_gather(gather_infos, analyse_dict[key1][key2])
+    batch_info = [gather_info.cpu().numpy() for gather_info in gather_infos]
+    return batch_info
+
+def concat_analyse(analyse_matrix, num_samples):
+    n_measures = len(analyse_matrix)
+    for i in range(n_measures):
+        analyse_matrix[i] = np.concatenate(analyse_matrix[i], axis=0)
+        analyse_matrix[i] = analyse_matrix[i][:num_samples]
+    return analyse_matrix
 
 
 def create_argparser():
@@ -179,4 +257,4 @@ def create_argparser():
 
 if __name__ == "__main__":
     ngpus = th.cuda.device_count()
-    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=True)
+    hfai.multiprocessing.spawn(main, args=(), nprocs=ngpus, bind_numa=False)

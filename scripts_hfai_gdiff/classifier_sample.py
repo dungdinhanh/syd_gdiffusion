@@ -24,6 +24,7 @@ from guided_diffusion_hfai.script_util import (
 )
 import datetime
 from PIL import Image
+import hfai.client
 
 
 def main(local_rank):
@@ -130,6 +131,9 @@ def main(local_rank):
         batch_labels = [labels.cpu().numpy() for labels in gathered_labels]
         all_labels.extend(batch_labels)
         if dist.get_rank() == 0:
+            if hfai.client.receive_suspend_command():
+                print("Receive suspend - good luck next run ^^")
+                hfai.client.go_suspend()
             logger.log(f"created {len(all_images) * args.batch_size} samples")
             np.savez(checkpoint, np.stack(all_images), np.stack(all_labels))
 

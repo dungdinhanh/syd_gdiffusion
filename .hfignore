@@ -28,6 +28,12 @@ models/128x128_diffusion.pt
 models/256x256_classifier.pt
 models/256x256_diffusion.pt
 models/256x256_diffusion_uncond.pt
+models/512x512_diffusion.pt
+models/512x512_classifier.pt
+models/lsun_cat.pt
+models/lsun_horse.pt
+models/lsun_horse_nodropout.pt
+models/lsun_bedroom.pt
 reference/logits_10000x10.npz
 reference/tsne.png
 reference/VIRTUAL_imagenet64_labeled.npz
@@ -39,3 +45,8 @@ build/
 dist/
 evaluations/classify_image_graph_def.pb
 classify_image_graph_def.pb
+bash_scripts/
+bash_scripts_local/
+bash_scripts2/
+runs/sampling/
+runs/sampling2/

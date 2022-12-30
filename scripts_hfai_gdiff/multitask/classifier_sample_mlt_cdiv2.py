@@ -1,8 +1,11 @@
 """
+
+Similar to Cdiv but Cdiv2 aims to avoid any possible contact between diversity and diffusion
+
 Like image_sample.py, but use a noisy image classifier to guide the sampling
 process towards more realistic images.
 
-PCGrad on each image in batch
+PCGrad on classificaiton - div + classification - diffusion
 """
 
 import argparse
@@ -24,13 +27,11 @@ from guided_diffusion_hfai.script_util import (
     add_dict_to_argparser,
     args_to_dict,
 )
-import hfai.client
 import hfai.multiprocessing
 
-from guided_diffusion_hfai.script_util_mlt import create_model_and_diffusion_mlt2
+from guided_diffusion_hfai.script_util_mlt import create_model_and_diffusion_cdiv2 # diffusion - classification conflict + classification - diversity conflict
 import datetime
 from PIL import Image
-
 
 
 def main(local_rank):
@@ -49,7 +50,7 @@ def main(local_rank):
     os.makedirs(output_images_folder, exist_ok=True)
 
     logger.log("creating model and diffusion...")
-    model, diffusion = create_model_and_diffusion_mlt2(
+    model, diffusion = create_model_and_diffusion_cdiv2(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
     model.load_state_dict(
@@ -137,9 +138,6 @@ def main(local_rank):
         batch_labels = [labels.cpu().numpy() for labels in gathered_labels]
         all_labels.extend(batch_labels)
         if dist.get_rank() == 0:
-            if hfai.client.receive_suspend_command():
-                print("Receive suspend - good luck next run ^^")
-                hfai.client.go_suspend()
             logger.log(f"created {len(all_images) * args.batch_size} samples")
             np.savez(checkpoint, np.stack(all_images), np.stack(all_labels))
 
