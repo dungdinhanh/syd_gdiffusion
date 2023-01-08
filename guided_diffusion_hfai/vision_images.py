@@ -27,6 +27,8 @@ import PIL
 from typing import Any, Callable, List, Optional, Union, Tuple
 from torchvision.datasets.vision import VisionDataset
 from torchvision.datasets.utils import download_file_from_google_drive, check_integrity, verify_str_arg
+import torchvision
+
 
 
 class ImageDataset(Dataset):
@@ -1117,6 +1119,130 @@ class CelebALocal(BaseDataset):
     def extra_repr(self) -> str:
         lines = ["Target type: {target_type}", "Split: {split}"]
         return '\n'.join(lines).format(**self.__dict__)
+
+
+class CIFAR10HF(torchvision.datasets.CIFAR10, BaseDataset):
+    """
+    这是一个用于识别普适物体的小型数据集
+
+    该数据集一共包含 10 个类别的 RGB 彩色图片，每个图片的尺寸为 32 × 32 ，每个类别有 600 个图像，数据集中一共有 500 张训练图片和 100 张测试图片。更多信息参考官网：https://www.cs.toronto.edu/~kriz/cifar.html
+
+    Args:
+        split (str): 数据集划分形式，包括：训练集（``train``）或者验证集（``val``）
+        transform (Callable): transform 函数，对图片进行 transfrom，接受一张图片作为输入，输出 transform 之后的图片
+        target_transform (Callable): 对 target 进行 transfrom，接受一个 target 作为输入，输出 transform 之后的 target
+
+    Returns:
+        image, target (PIL.Image.Image, int): 返回的每条样本是一个元组，包含一个RGB格式的图片，及其对应的目标标签
+
+    Examples:
+
+    .. code-block:: python
+
+        from hfai.datasets import CIFAR10
+        from torchvision import transforms
+
+        transform = transforms.Compose([
+            transforms.Resize(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+
+        dataset = CIFAR10('train', transform)
+        loader = dataset.loader(batch_size=64, num_workers=4)
+
+        for image, target in loader:
+            # training model
+
+    NOTE:
+        使用的时候所有数据会直接加载进内存，大小大约为 178 MiB。``CIFAR10`` 和 ``CIFAR100`` 的 ``loader()`` 方法返回的是一个 ``torch.utils.data.DataLoader`` ，而不是 ``ffrecord.torch.DataLoader`` 。
+
+    """
+
+    def __init__(
+        self, split: str, transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, data_folder=None,
+            local_classes=True, random_flip=True
+    ) -> None:
+        assert split in ["train", "test"]
+        if data_folder is None:
+            data_folder = str(get_data_dir())
+        super().__init__(os.path.join(data_folder, "CIFAR"), split == "train", transform, target_transform, download=True)
+        self.resolution=32
+        self.local_classes = local_classes
+        self.random_flip = random_flip
+
+    def loader(self, *args, **kwargs) -> torch.utils.data.DataLoader:
+        return torch.utils.data.DataLoader(self, *args, **kwargs)
+
+
+    def __getitem__(self, indices):
+        """
+        Args:
+            index (int): Index
+
+        Returns:
+            tuple: (image, target) where target is index of the target class.
+        """
+        transformed_samples = []
+        for index in indices:
+            img, target = self.data[index], self.targets[index]
+
+            # doing this so that it is consistent with all other datasets
+            # to return a PIL Image
+            img = Image.fromarray(img)
+            arr = center_crop_arr(img, self.resolution)
+            if self.random_flip and random.random() < 0.5:
+                arr = arr[:, ::-1]
+            img = arr.astype(np.float32) / 127.5 - 1
+            img = np.transpose(img, [2, 0, 1])
+            out_dict = {}
+            if self.local_classes:
+                out_dict["y"] = target
+
+            transformed_samples.append((img, out_dict))
+        return transformed_samples
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+
+class ImageNetHFtest(ImageNet):
+    def __init__(self, resolution, random_crop=False, random_flip=True, split='train', classes=True):
+        # to_tensor_transform = transforms.Compose([transforms.ToTensor()])
+        super(ImageNetHFtest, self).__init__(split=split, transform=None, check_data=True, miniset=False)
+        self.resolution = resolution
+        self.random_crop = random_crop
+        self.random_flip = random_flip
+        self.local_classes = classes
+
+    def __getitem__(self, indices):
+        imgs_bytes = self.reader.read(indices)
+        samples = []
+        for i, bytes_ in enumerate(imgs_bytes):
+            img = pickle.loads(bytes_).convert("RGB")
+            label = self.meta["targets"][indices[i]]
+            samples.append((img, int(label)))
+
+        transformed_samples = []
+        for img, label in samples:
+            if self.random_crop:
+                arr = random_crop_arr(img, self.resolution)
+            else:
+                arr = center_crop_arr(img, self.resolution)
+
+            if self.random_flip and random.random() < 0.5:
+                arr = arr[:, ::-1]
+
+            img = arr.astype(np.float32) / 127.5 - 1
+            img = np.transpose(img, [2, 0, 1]) # might not need to transpose
+            # if self.transform:
+            #     img = self.transform(img)
+            out_dict = {}
+            if self.local_classes:
+                out_dict["y"] = label
+
+            transformed_samples.append((img, out_dict))
+        return transformed_samples
 
 def center_crop_arr(pil_image, image_size):
     # We are not on a new enough PIL to support the `reducing_gap`

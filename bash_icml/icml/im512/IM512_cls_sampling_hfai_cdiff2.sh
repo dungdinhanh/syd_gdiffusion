@@ -21,9 +21,9 @@ scales=( "6.0" "8.0" "10.0" )
 
 for scale in "${scales[@]}"
 do
-cmd="python  scripts_hfai_gdiff/multitask/classifier_sample_mlt2.py  $MODEL_FLAGS --classifier_scale ${scale} \
+cmd="python  scripts_hfai_gdiff/multitask/classifier_sample_mlt2_largeres.py  $MODEL_FLAGS --classifier_scale ${scale} \
  --classifier_path models/512x512_classifier.pt --model_path models/512x512_diffusion.pt $SAMPLE_FLAGS \
- --logdir runs/sampling_icml/IMN512/conditional_cdiff/scale${scale}/"
+ --logdir runs/sampling_icml/IMN512/conditional_cdiff/scale${scale}/ --half_save True"
 echo ${cmd}
 eval ${cmd}
 done
@@ -33,5 +33,5 @@ done
 
 
 
-#cmd="python scripts_hfai_gdiff/classifier_sample.py --logdir runs/classifier_pretrained/ ${MODEL_FLAGS} --classifier_scale 1.0 --classifier_path models/64x64_classifier.pt \
+#cmd="python scripts_hfai_gdiff/classifier_free_sample.py --logdir runs/classifier_pretrained/ ${MODEL_FLAGS} --classifier_scale 1.0 --classifier_path models/64x64_classifier.pt \
 # --classifier_depth 4 --model_path models/64x64_diffusion.pt ${SAMPLE_FLAGS}"

@@ -50,3 +50,8 @@ bash_scripts_local/
 bash_scripts2/
 runs/sampling/
 runs/sampling2/
+reference/biggan_deep_imagenet64.npz
+reference/biggan_deep_trunc1_imagenet128.npz
+reference/biggan_deep_trunc1_imagenet256.npz
+reference/iddpm_imagenet64.npz
+

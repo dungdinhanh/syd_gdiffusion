@@ -82,6 +82,21 @@ def load_dataset_MNIST(*,
     while True:
         yield from loader
 
+def load_dataset_CIFAR10(*,
+                        train=True,
+                        batch_size,
+                        class_cond=True, data_folder=None):
+
+    os.makedirs("./data", exist_ok=True)
+    if train:
+        dataset = CIFAR10HF(local_classes=class_cond, split='train', data_folder=data_folder)
+    else:
+        dataset = CIFAR10HF(local_classes=class_cond, split='val', data_folder=data_folder)
+    data_sampler = DistributedSampler(dataset, shuffle=True)
+    loader = DataLoader(dataset, batch_size, num_workers=8, sampler=data_sampler, pin_memory=True)
+    while True:
+        yield from loader
+
 def load_dataset_MNIST_nosampler(*,
                         train=True,
                         batch_size,

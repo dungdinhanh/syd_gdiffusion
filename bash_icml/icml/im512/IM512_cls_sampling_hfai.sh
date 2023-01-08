@@ -7,7 +7,7 @@ MODEL_FLAGS="--attention_resolutions 32,16,8 --class_cond True --diffusion_steps
 
 
 SAMPLE_FLAGS="--batch_size 4 --num_samples 50000 --timestep_respacing 250"
-#SAMPLE_FLAGS="--batch_size 1 --num_samples 50000 --timestep_respacing 250"
+#SAMPLE_FLAGS="--batch_size 1 --num_samples 6 --timestep_respacing 250"
 
 
 cmd="cd ../../../"
@@ -22,17 +22,17 @@ scales=( "1.0" "2.0" "4.0" )
 
 for scale in "${scales[@]}"
 do
-cmd="python  scripts_hfai_gdiff/classifier_sample.py  $MODEL_FLAGS --classifier_scale ${scale} \
+cmd="python  scripts_hfai_gdiff/classifier_sample_largeres.py  $MODEL_FLAGS --classifier_scale ${scale} \
  --classifier_path models/512x512_classifier.pt --model_path models/512x512_diffusion.pt $SAMPLE_FLAGS \
- --logdir runs/sampling_icml/IMN512/conditional_nomlt/scale${scale}/"
+ --logdir runs/sampling_icml/IMN512/conditional_nomlt/scale${scale}/ --half_save True"
 echo ${cmd}
 eval ${cmd}
 done
 
 
-#cmd="python  scripts_hfai_gdiff/classifier_sample.py  $MODEL_FLAGS --classifier_scale 1.0 \
+#cmd="python  scripts_hfai_gdiff/classifier_sample_largeres.py  $MODEL_FLAGS --classifier_scale 1.0 \
 # --classifier_path models/512x512_classifier.pt --model_path models/512x512_diffusion.pt $SAMPLE_FLAGS \
-# --logdir ../output/test_draft512/"
+# --logdir ../output/test_draft512_large2/ --half_save True"
 #echo ${cmd}
 #eval ${cmd}
 
@@ -40,5 +40,5 @@ done
 
 
 
-#cmd="python scripts_hfai_gdiff/classifier_sample.py --logdir runs/classifier_pretrained/ ${MODEL_FLAGS} --classifier_scale 1.0 --classifier_path models/64x64_classifier.pt \
+#cmd="python scripts_hfai_gdiff/classifier_free_sample.py --logdir runs/classifier_pretrained/ ${MODEL_FLAGS} --classifier_scale 1.0 --classifier_path models/64x64_classifier.pt \
 # --classifier_depth 4 --model_path models/64x64_diffusion.pt ${SAMPLE_FLAGS}"

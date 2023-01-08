@@ -8,7 +8,7 @@ MODEL_FLAGS="--attention_resolutions 32,16,8 --class_cond True --diffusion_steps
 
 SAMPLE_FLAGS="--batch_size 8 --num_samples 10000 --timestep_respacing 250"
 
-cmd="cd ../../"
+cmd="cd ../../../"
 echo ${cmd}
 eval ${cmd}
 
@@ -30,5 +30,5 @@ done
 
 
 #eval ${cmd}
-#cmd="python scripts_hfai_gdiff/classifier_sample.py --logdir runs/classifier_pretrained/ ${MODEL_FLAGS} --classifier_scale 1.0 --classifier_path models/64x64_classifier.pt \
+#cmd="python scripts_hfai_gdiff/classifier_free_sample.py --logdir runs/classifier_pretrained/ ${MODEL_FLAGS} --classifier_scale 1.0 --classifier_path models/64x64_classifier.pt \
 # --classifier_depth 4 --model_path models/64x64_diffusion.pt ${SAMPLE_FLAGS}"
